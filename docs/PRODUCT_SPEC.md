@@ -1,0 +1,2 @@
+# Product specification (draft)
+Original offline-first Android infinite canvas for drawing and visual productivity. Primary input stylus; fingers pan/pinch by default. Canonical editable vector strokes; notebooks/workspaces, selection, layers, shapes, text, images, search, import/export and reliable save/recovery. UI should borrow useful interaction principles, not copy proprietary artwork or layouts. M00/M06 must expand user journeys, interaction state machine and design tokens for approval.

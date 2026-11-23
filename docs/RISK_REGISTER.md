@@ -1,0 +1,15 @@
+# M00 risk register — open unless evidence says otherwise
+
+Local snapshot, branch/SHA none. [Evidence and inspected paths](M00_AUDIT.md). Priorities reflect consequence, not measured frequency.
+
+|Priority / owner|Evidence → risk|Required mitigation or acceptance evidence|
+|---|---|---|
+|P0 owner / build|No Git HEAD; corrected ZIP's Java timing block fails javac → no reproducible installable baseline.|Identify canonical import, pin full SHA, authorize narrow repair or supply working baseline; build APK and launch before migration.|
+|P0 input|Live Activity bypasses adapter; historical samples, canceled UP, reused IDs, equal time and palm transitions can diverge from host replay.|Drive actual MotionEvents on pre-34 and 34+; assert stroke lifetime, order, original times and pressure, no commit on cancel.|
+|P1 geometry / latency|Exact-fit reserves on growing vectors, pen-up copies, mesh bounds pass and mutex → long-stroke latency tail.|Measure allocations, append, commit and mutex wait vs 1k/10k/100k samples; compare tail updates to full refit on curves, corners, repeated positions and pressure-only changes.|
+|P1 graphics|Absolute float vertices and pan subtraction; live and finished tessellation use different step rules and radius is fixed at begin → jitter and possible shape change on lift.|At pan `2^24`, positive float spacing is 2 world units (32 screen pixels at 16×). Compare translated near/far goldens; compare last live vs first finished pixels at 0.1×, 1× and 16× for curves, pressure ramps, dots, caps and joins.|
+|P1 graphics / storage|Linear finished traversal, multiple mesh copies and persistent VBOs → frame time/memory depend on history, context reload spikes.|Seeded sparse/dense scenes, enforce bytes/queue/eviction budgets, compare draw order with culling disabled, compare cold/warm and recreated contexts.|
+|P1 document|No persistence, recovery or undo → loss of user work; CSV is diagnostic only.|Do not present demo as a notebook. Approve vector identity/order and format before round-trip, kill-during-save and corruption tests.|
+|P1 QA / telemetry|Mock shaders, filtered 120-callback averages, latest sample attribution and UI-side logging → false latency/visual confidence.|Record uncensored traced sample/frame IDs, p50/p95/p99 and missed frames, GPU/driver, refresh, thermal and scene hash. Compare recorder on/off; optical setup only for photon claims.|
+|P1 platform|Process-global native GL state and cache invalidation on resize (`native_bridge.cpp:948–975`) mix resize, context recreation and surface ownership.|Exercise same-context resize, concurrent surfaces, actual EGL loss and pause/resume separately on named tablet; compare pixels, memory and reload bytes, verify idle render count; test process death separately.|
+|P2 build / release|No project license, dependency lock/SBOM or distribution checksum; host-script portability and cached offline dependencies.|Track rights/notices, verify wrapper/distribution, build from pinned clean CI environment and retain logs. Do not ship until resolved.|

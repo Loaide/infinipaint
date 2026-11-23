@@ -1,0 +1,6 @@
+cmake_minimum_required(VERSION 3.22.1)
+project(infinipaint_tablet_test LANGUAGES CXX)
+add_library(ip_tablet SHARED native_bridge.cpp input/one_euro_filter.cpp input/input_processor.cpp stroke/spline.cpp)
+target_compile_features(ip_tablet PRIVATE cxx_std_20)
+target_include_directories(ip_tablet PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(ip_tablet PRIVATE GLESv2 log)

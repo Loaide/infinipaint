@@ -1,0 +1,16 @@
+# Local Android / Gradle state
+.gradle/
+**/build/
+.cxx/
+.externalNativeBuild/
+local.properties
+.idea/
+*.iml
+# Generated outputs
+*.apk
+*.aab
+*.log
+# Reference archives: keep local; textual legacy docs can be versioned
+references/*.zip
+# Local benchmark and device captures
+captures/

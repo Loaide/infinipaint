@@ -1,0 +1,8 @@
+# Add selectively to your repository .gitignore
+references/*.zip
+reports/traces/
+reports/*.perfetto-trace
+*.apk
+local.properties
+.gradle/
+.cxx/
