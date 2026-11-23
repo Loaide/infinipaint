@@ -4,4 +4,4 @@ M00 is approved as an audit. Its no-checkout finding describes the earlier snaps
 
 The local repair restores the four renderer-owned frame-timing accumulators and resets them together after every 120 callbacks. No stylus, filtering, spline, renderer API, native code, storage or Gradle configuration changed. See the [stabilization handoff](../reports/LATEST.md) for verification and remaining limits; the [M00 audit](M00_AUDIT.md) remains historical evidence.
 
-Debug APK built from both the working tree and an isolated clean source copy; all four native ABIs compiled. Lint: 0 errors, 7 warnings, none blocking this repair. Gradle unit tests: no source. Both host replays and mock-GLES smoke passed. Tablet installation and launch remain unverified. Owner authorized a local commit only; M01 has not started.
+M00.5 accepted after owner tablet testing; tested commit `8bca6fc0be92f8f3fd0f8ad169d80c48e7442914` was pushed without force to `origin/fix/android-baseline`. See [session handoff](SESSION_HANDOFF.md) for automated results, owner observations, limitations and next actions. No merge into `main` or M01 start authorized.

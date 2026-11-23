@@ -1,6 +1,8 @@
 # InfiniPaint agent contract
 
-Read `docs/ENGINEERING_CONTRACT.md`, `docs/CURRENT_STATE.md`, `docs/DECISIONS.md` and relevant `docs/` before code edits. If a file is missing, create a proposed version during M00 and mark it unapproved.
+On session start, read the engineering contract and `docs/SESSION_HANDOFF.md`. Compare the expected branch and full SHA with `git branch --show-current` and `git rev-parse HEAD`; inspect staged, unstaged and untracked paths with `git status -sb -uall`. For a later HEAD, verify `git merge-base --is-ancestor <anchor> HEAD` and inspect `git diff --name-status <anchor> HEAD`. Carry application test evidence forward unchanged only for documentation-only descendants. Stop on wrong branch, divergence or unexplained changes; do not auto-switch or clean. If the handoff is missing or contradictory, reconstruct from Git, state and latest report before acting; ask if authorization is unclear.
+
+Use the handoff as an index: open relevant state, ADRs, evidence and affected code only. Before code edits, check `docs/CURRENT_STATE.md` and the applicable decisions in `docs/DECISIONS.md`.
 
 Source of truth: verified repository HEAD plus approved ADRs. Historical ZIPs are reference artifacts, not proof of implementation. Record branch, full SHA and inspected files in every substantial report. Never claim tests ran without output evidence.
 
@@ -10,7 +12,7 @@ Source of truth: verified repository HEAD plus approved ADRs. Historical ZIPs ar
 3. Implement a coherent vertical slice on a task branch.
 4. Run targeted tests, regression suite and device tests when applicable.
 5. Invoke independent reviewer; fix findings or document blockers.
-6. Update docs, write concise handoff with branch/SHA, test commands/results and limitations.
+6. At milestone completion or a material change of gate, refresh `docs/SESSION_HANDOFF.md` and reconcile state/report before stopping. Follow the handoff checklist in `docs/ENGINEERING_CONTRACT.md`.
 7. Stop at milestone gate; request owner approval. Do not merge/push without approval.
 
 ## Nonnegotiables

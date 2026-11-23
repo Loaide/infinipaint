@@ -14,4 +14,6 @@ Android UI/interaction -> input normalization -> incremental spline -> canonical
 No 'done' without tests, device evidence when needed, benchmark comparison, review and updated docs. Maintain visual goldens, adversarial geometry tests, deterministic replay, lifecycle and recovery tests. Separate simulation measurements from physical stylus-to-photon claims.
 
 ## Milestone approval
+At completion and after owner acceptance, the lead replaces the short snapshot in `docs/SESSION_HANDOFF.md` (aim for one screen). Include milestone and approval gate; branch and full tested/inspected SHA; test results, provenance and limits; open risks; applicable approved/provisional ADRs; next authorized actions. Distinguish the tested application SHA from later documentation commits. Link detailed evidence, never paste transcripts. Reconcile with `docs/CURRENT_STATE.md` and `reports/LATEST.md`. On resume verify Git identity/status, inspect only relevant differences and follow evidence links as needed. A handoff records approvals; it does not grant them.
+
 M00 Audit; M01 integrated app shell; M02 ink; M03 document and persistence; M04 large-scale renderer; M05 extreme zoom; M06 productivity UI; M07 hardening. Each gate requires written acceptance and owner approval.
