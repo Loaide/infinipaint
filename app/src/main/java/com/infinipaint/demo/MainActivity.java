@@ -570,6 +570,10 @@ public final class MainActivity extends Activity {
 
         gl.setRenderer(new GLSurfaceView.Renderer() {
 
+            // Zero-initialized per renderer; only the GL thread updates this window.
+            private long renderWindowQueueNs, renderWindowNativeNs;
+            private int renderWindowQueueSamples, renderWindowCount;
+
             @Override
             public void onSurfaceCreated(
                     javax.microedition.khronos.opengles.GL10 unused,
@@ -615,13 +619,14 @@ public final class MainActivity extends Activity {
                     renderWindowQueueSamples++;
                 }
                 renderWindowNativeNs += endNs - startNs;
-                if (++renderWindowCount % 120 == 0) {
+                if (++renderWindowCount == 120) {
                     android.util.Log.i("IP_FRAME_TIMING", String.format(java.util.Locale.US,
                         "event_request_to_draw_avg_ms=%.3f native_render_avg_ms=%.3f queue_samples=%d " +
                         "note=GLSurfaceView swaps after onDrawFrame; actual presentation not measured",
                         renderWindowQueueSamples > 0 ? renderWindowQueueNs / (renderWindowQueueSamples*1e6) : -1.0,
                         renderWindowNativeNs / 120e6, renderWindowQueueSamples));
                     renderWindowQueueNs = renderWindowNativeNs = renderWindowQueueSamples = 0;
+                    renderWindowCount = 0;
                 }
             }
         });

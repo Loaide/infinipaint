@@ -1,7 +1,7 @@
-# Current state — M00 audited; awaiting owner decision
+# Current state — Android baseline stabilization
 
-Local Android diagnostic source matches the corrected ZIP. This directory is not a Git checkout: branch and full SHA unavailable. Remote lookup advertised no refs; the previously reported GitHub SHA does not establish local provenance.
+M00 is approved as an audit. Its no-checkout finding describes the earlier snapshot. The M00.5 repair on `fix/android-baseline` is based on `568163c0f984f024731f8a32cb129865aed690d9`, verified against GitHub `refs/heads/main` at stabilization time.
 
-The unmodified Android native target compiles for four ABIs. The full debug build fails at Java compilation in `MainActivity.java:614–624` (four undeclared timing fields). No installable baseline, device, presentation measurements or production integration verified. [Commands and host-test evidence](M00_AUDIT.md); [latest handoff](../reports/LATEST.md).
+The local repair restores the four renderer-owned frame-timing accumulators and resets them together after every 120 callbacks. No stylus, filtering, spline, renderer API, native code, storage or Gradle configuration changed. See the [stabilization handoff](../reports/LATEST.md) for verification and remaining limits; the [M00 audit](M00_AUDIT.md) remains historical evidence.
 
-Owner action: accept or revise the audit, identify/authorize a canonical baseline and choose a known-good source or a separately authorized build repair. No M01 work, architecture approval or push is implied.
+Debug APK built from both the working tree and an isolated clean source copy; all four native ABIs compiled. Lint: 0 errors, 7 warnings, none blocking this repair. Gradle unit tests: no source. Both host replays and mock-GLES smoke passed. Tablet installation and launch remain unverified. Owner authorized a local commit only; M01 has not started.
