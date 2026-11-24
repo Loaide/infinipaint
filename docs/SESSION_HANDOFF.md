@@ -1,7 +1,6 @@
-# Session handoff — M01 ready for owner testing
+# Session handoff — M01 accepted and complete
 
-- Verified clean local `main` and live GitHub `refs/heads/main` at `db36eaba697ef46beb14f77e396405d7af20cf65`. The previous M00.5 tablet-tested application `8bca6fc0be92f8f3fd0f8ad169d80c48e7442914` is an ancestor; only documentation and agent instructions differ.
-- **Tested application:** `feature/m01-app-foundation` at `ac4310a6c4cf1c6eb0e864bbd84dc48c5654cb78`; this handoff follows in a docs-only commit. Verified working-tree bytes were committed locally. No merge or push.
+- **Resume branch:** `main`. Tested application: `ac4310a6c4cf1c6eb0e864bbd84dc48c5654cb78`; inspected pre-closure checkpoint: `3ce79abd71df2db2ed0fb2eeeda3c3b5a7cc9204`. Only documentation changed after the tested commit. The closure commit containing this handoff is the fast-forward publication target; preserve `feature/m01-app-foundation`.
 - **Implemented:** real camera/gesture JVM tests, saved camera/modes, separate EGL context and viewport handling, single renderer owner, bounded frame-request/callback diagnostics and debug CI workflow. Java/JNI/GLES2 baseline retained; [decision register](DECISIONS.md) unchanged.
-- **Local evidence:** debug APK and 4 ABIs, 10 JVM tests passed, lint 0 errors/8 warnings, 120+70 host samples with zero failures, mock GLES resize/rebuild and camera checks passed. [Report, APK hash and tablet checklist](../reports/LATEST.md). No M01 tablet installation, GPU validation, idle measurement or remote CI result.
-- **Next:** owner tests this APK, captures [idle and active counters](M01_FRAME_CAPTURE.md), verifies rotate/resize, pause/resume and observed context recreation, then accepts or returns findings. World-float precision, in-memory strokes and linear culling remain diagnostic limits. Do not merge, push or begin M02.
+- **Evidence:** previous local debug build, 4 ABIs, 10 JVM tests, host replays and mock GLES passed; lint 0 errors/8 warnings. Owner approved all 17 checks on SM-X626B, including actual context recreation. Supplied captures: 79.047 s of idle with zero requests or callbacks. [Measurements, provenance and limitations](../reports/LATEST.md).
+- **Next:** await separate execution authorization for M02 (live ink). World-float precision, in-memory strokes and linear culling remain diagnostic limits.

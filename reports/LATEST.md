@@ -21,13 +21,30 @@ Branch `feature/m01-app-foundation`, based on the verified local and remote `mai
 |Mock GLES|Strict host compile (`-Wall -Wextra -Wpedantic -Werror`, pinned NDK `jni.h`); smoke passed, including same-context resize without GL name churn or upload, fresh-context recovery of active and completed geometry, Clear, culling, and nonidentity camera mapping through real raw vertices and projection uniforms. Later live append transferred 2,112 bytes on this fixture. No shader pixels or driver timings measured.|
 |CI and diff|Workflow YAML parsed locally; executed its XML count guard against the local results (10). Local wrapper tasks passed. No GitHub Actions run or cold Ubuntu provisioning was performed. `git diff --check` passed.|
 
-**APK:** `D:\DOWNLAODS\hello\InfiniPaint\app\build\outputs\apk\debug\app-debug.apk`, SHA-256 `319971d5c233ae1e597c3834c6d18379d15cda7c53a3e7a7f92630a0550acad8`. No installation or device interaction test performed for this candidate.
+**APK:** `D:\DOWNLAODS\hello\InfiniPaint\app\build\outputs\apk\debug\app-debug.apk`, SHA-256 `319971d5c233ae1e597c3834c6d18379d15cda7c53a3e7a7f92630a0550acad8`. The owner reported the same SHA-256 for the tested APK.
 
 **Review and files:** the focused graphics reviewer approved the single-instance fix on source review. The application commit contains the complete file manifest (`git show --stat ac4310a`): workflow, Gradle, manifest, MainActivity, NativeBridge, CanvasCamera, FingerNavigation, FrameTelemetry, their three JVM suites, native bridge and renderer smoke. Inspection also covered the frame-capture procedure, audit exporter, CMake, diagnostic scripts, engineering contract, state/handoff, roadmap, backlog and decision register. The [accepted M00.5 report](https://github.com/Loaide/infinipaint/blob/8bca6fc0be92f8f3fd0f8ad169d80c48e7442914/reports/LATEST.md) is historical, not evidence for this APK.
 
 **Idle evidence:** no continuous scheduler found. An unchanged finger MOVE now requests no frame. In the synthetic telemetry test, a 30-second clock advance produced a zero callback delta; one injected unrequested callback then incremented both the callback and `withoutPending` deltas by one. That verifies accounting, not device idle behavior. No M01 FPS, presentation latency or power measurement is claimed.
 
-## Tablet acceptance (pending)
+## Owner acceptance — all 17 checks passed; M01 complete
+
+Device: SM-X626B, fingerprint `samsung/gts10fepxx/gts10fep:16/BP2A.250605.031.A3/X626BXXS7BZB7_OJM7BZB7:user/release-keys`. Refresh-rate setting was not recorded.
+
+The first five checks (debug build, four native ABIs, 10 JVM tests, host replay and mock GLES) have independent local evidence above. No code was rebuilt at closure. The following interval deltas were supplied by the owner:
+
+|Interval|Duration (ms)|Camera requests|Stylus requests|Other requests|Draw callbacks|Without pending|
+|---|---:|---:|---:|---:|---:|---:|
+|Initial idle|38715|0|0|0|0|0|
+|Camera|35017|2046|0|0|2046|0|
+|Stylus|43786|0|2590|1|2591|0|
+|Final idle|40332|0|0|0|0|0|
+
+The two idle windows total **79.047 seconds with zero requests and zero draw callbacks**. Mean request-to-callback time was approximately 0.649 ms in the camera interval and 0.444 ms in the stylus interval (which included one other request). Mean native render-call durations were approximately 0.182 ms and 0.382 ms respectively; maximum observed native call was 11.12004 ms. These are callback and native-call measurements, not display FPS, GPU completion time or physical stylus latency.
+
+Separately, the owner reports correct drawing and smoothing, smooth pan/pinch without jumps, and correct palm rejection and pointer transitions. Rotation retained ink, camera and settings; split-screen resize, background/foreground and lock/unlock passed. Activity recreation retained completed ink, and the owner verified actual graphics-context recreation. Those lifecycle results are owner observations, not conclusions inferred from the counters or independent device captures by engineering.
+
+## Tablet test procedure (reference)
 
 1. Record APK hash, app SHA, tablet model, OS build and refresh mode. Updating the app can discard in-memory ink. When ready, install with `adb install -r app/build/outputs/apk/debug/app-debug.apk`.
 2. Draw a landmark, choose nondefault display/smoothing modes, pan and pinch. Check the landmark stays under the moving focal point, the surviving finger does not jump, and fingers work again after cancellation. Verify stylus drawing and historical samples, preview, pen-up, filter changes and Clear.
