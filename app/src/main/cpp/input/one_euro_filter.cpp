@@ -53,7 +53,12 @@ core::Result<CleanInputPoint> OneEuroFilter::filter(const RawInputPoint& p) {
     if (dt == 0.0) {
         // No elapsed time: retain original timestamp and sample. Avoid fake dt,
         // infinite derivative, or a fabricated filter update.
-        out.position=prev_filtered_;
+        // No temporal low-pass step exists at dt=0. Keep the ordered spatial
+        // displacement (including the previous filter offset), not a frozen knot.
+        out.position={prev_filtered_.x+(p.position.x-prev_raw_.x),
+                      prev_filtered_.y+(p.position.y-prev_raw_.y)};
+        if (!out.position.finite()) return core::Error{core::ErrorCode::NumericalError,"Equal-time displacement overflow"};
+        prev_filtered_=out.position;
         out.velocity=prev_derivative_;
         out.speed=prev_derivative_.length();
         prev_raw_=p.position;

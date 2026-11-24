@@ -25,6 +25,9 @@ core::Result<void> InputProcessor::begin_stroke() {
     return {};
 }
 core::Result<CleanInputPoint> InputProcessor::process(const RawInputPoint& p) {
+    return process(p,nullptr,nullptr);
+}
+core::Result<CleanInputPoint> InputProcessor::process(const RawInputPoint& p, void* ctx, BeforeCommit before) {
     if (!active_) return core::Error{core::ErrorCode::InvalidState,"No active stroke"};
     if (raw_.size() >= max_samples_) return core::Error{core::ErrorCode::ResourceLimit,"Active stroke sample limit exceeded"};
     OneEuroFilter candidate=filter_;
@@ -37,6 +40,10 @@ core::Result<CleanInputPoint> InputProcessor::process(const RawInputPoint& p) {
     } catch (const std::bad_alloc&) { return memory_error(); }
       catch (const std::length_error&) { return memory_error(); }
     // After successful reserves, appending trivially copyable samples cannot throw.
+    if (before) {
+        auto ready=before(ctx,r.value());
+        if (!ready) return ready.error();
+    }
     raw_.push_back(p);
     clean_.push_back(r.value());
     filter_=std::move(candidate);

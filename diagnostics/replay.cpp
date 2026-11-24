@@ -44,7 +44,7 @@ int main(int argc,char**argv){
   for(auto&r:rows){if(r.id!=id)continue;
    double t=r.ns/1e9;
    if(t<last){failures++;continue;}
-   const bool sameTime = t==last; last=t;
+    last=t;
    engine::input::RawInputPoint point{{r.x,r.y},t,r.p,r.tx,r.ty};
    auto a=Clock::now();auto result=p.value().process(point);auto b=Clock::now();
    if(!result){failures++;continue;}
@@ -52,7 +52,7 @@ int main(int argc,char**argv){
    double e=std::hypot(c.position.x-r.x,c.position.y-r.y);
    filterSq+=e*e;maxFilter=std::max(maxFilter,e);count++;
    engine::stroke::SplinePoint sp{c.position,c.timestamp,c.pressure,c.tilt_x,c.tilt_y,c.speed};
-   a=Clock::now();auto appended=sameTime ? engine::core::Result<void>{} : builder.append(sp);b=Clock::now();splineUs+=micros(a,b);
+    a=Clock::now();auto appended=builder.append(sp);b=Clock::now();splineUs+=micros(a,b);
    if(!appended){failures++;continue;}
    originals.push_back(r);clean.push_back(c);
   }
@@ -79,5 +79,5 @@ int main(int argc,char**argv){
   <<" filter_max_deviation_px="<<maxFilter
   <<" spline_rms_deviation_px="<<(splineCount?std::sqrt(splineSq/splineCount):0)
   <<" spline_max_deviation_px="<<maxSpline<<"\n";
- std::cout<<"NOTE: deviations are relative to raw, not accuracy vs ground truth. This harness uses unbounded One-Euro output, not the demo's directional/2px limiter. Equal-time raw samples are retained; spline knots require increasing timestamps.\n";
+  std::cout<<"Deviations are relative to raw, not ground truth. Time-only queries select the last sample at a tied instant.\n";
 }

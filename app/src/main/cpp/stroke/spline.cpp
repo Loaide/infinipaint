@@ -9,6 +9,12 @@ namespace {
 using core::Vec2;
 using core::Error;
 using core::ErrorCode;
+template<class T> void reserve_one(std::vector<T>& v, std::size_t limit) {
+    if (v.size() != v.capacity()) return;
+    limit = std::min(limit, v.max_size());
+    if (v.size() >= limit) throw std::length_error("live stroke limit");
+    v.reserve(std::max(v.size()+1, v.size()+std::min(v.size(),limit-v.size())));
+}
 bool finite(Vec2 p) { return std::isfinite(p.x)&&std::isfinite(p.y); }
 bool finite_point(const SplinePoint& p) {
     return finite(p.position)&&std::isfinite(p.timestamp)&&p.timestamp>=0&&
@@ -84,7 +90,7 @@ core::Result<FittedSpline> SplineFitter::fit_world(const std::vector<SplinePoint
         for(std::size_t i=0;i<points.size();++i){
             const auto& p=points[i];
             if(!finite_point(p))return Error{ErrorCode::InvalidArgument,"Invalid world sample"};
-            if(i && !(p.timestamp>points[i-1].timestamp))return Error{ErrorCode::NonMonotonicTime,"Timestamps must increase"};
+            if(i && p.timestamp<points[i-1].timestamp)return Error{ErrorCode::NonMonotonicTime,"Regressing timestamp"};
             const Vec2 local=sub(p.position,out.origin_);
             if(!finite(local))return Error{ErrorCode::NumericalError,"World coordinate difference overflow"};
             if(unique.empty() || local.x!=unique.back().x || local.y!=unique.back().y){unique.push_back(local);indices.push_back(i);}
@@ -135,6 +141,11 @@ core::Result<StrokeSample> FittedSpline::evaluate(std::size_t segment,double u) 
     const Vec2 pos=add(origin_,local);
     if(!finite(pos)||!finite(tangent))return Error{ErrorCode::NumericalError,"Evaluation overflow"};
     const auto& a=source_[s.left];const auto& b=source_[s.right];
+    if (a.timestamp==b.timestamp) {
+        const auto& end=(u==1 && segment+1==segments_.size()) ? source_.back() : b;
+        return StrokeSample{pos,tangent,a.timestamp,interp(a.pressure,end.pressure,u),
+            interp(a.tilt_x,end.tilt_x,u),interp(a.tilt_y,end.tilt_y,u),interp(a.speed,end.speed,u)};
+    }
     // For the terminal endpoint, include pressure/tilt updates received while
     // stationary after the final geometric knot. The earlier timeline remains
     // accessible through evaluate_at_time().
@@ -150,10 +161,12 @@ core::Result<StrokeSample> FittedSpline::evaluate_at_time(double timestamp) cons
     if(source_.empty())return Error{ErrorCode::InvalidState,"Empty spline"};
     if(timestamp<source_.front().timestamp||timestamp>source_.back().timestamp)
         return Error{ErrorCode::InvalidArgument,"Time outside stroke range"};
-    auto it=std::lower_bound(source_.begin(),source_.end(),timestamp,
-        [](const SplinePoint& p,double t){return p.timestamp<t;});
-    if(it==source_.begin()||it->timestamp==timestamp)
-        return StrokeSample{it->position,{},it->timestamp,it->pressure,it->tilt_x,it->tilt_y,it->speed};
+    auto it=std::upper_bound(source_.begin(),source_.end(),timestamp,
+        [](double t,const SplinePoint& p){return t<p.timestamp;});
+    if((it-1)->timestamp==timestamp) {
+        const auto& p=*(it-1); // A time-only query returns the last sample at that instant.
+        return StrokeSample{p.position,{},p.timestamp,p.pressure,p.tilt_x,p.tilt_y,p.speed};
+    }
     const auto& a=*(it-1);const auto& b=*it;
     const double u=(timestamp-a.timestamp)/(b.timestamp-a.timestamp);
     const Vec2 pos{std::lerp(a.position.x,b.position.x,u),std::lerp(a.position.y,b.position.y,u)};
@@ -172,15 +185,15 @@ core::Result<StrokeSample> FittedSpline::evaluate(double t) const noexcept{
 core::Result<void> IncrementalSplineBuilder::append(const SplinePoint& p){
     if(!finite_point(p))return Error{ErrorCode::InvalidArgument,"Invalid live sample"};
     if(points_.size()>=fitter_.max_samples())return Error{ErrorCode::ResourceLimit,"Live stroke sample limit"};
-    if(!points_.empty() && !(p.timestamp>points_.back().timestamp))
-        return Error{ErrorCode::NonMonotonicTime,"Live timestamps must increase"};
+    if(!points_.empty() && p.timestamp<points_.back().timestamp)
+        return Error{ErrorCode::NonMonotonicTime,"Regressing live timestamp"};
     if(!points_.empty() && !finite(sub(p.position,points_.front().position)))
         return Error{ErrorCode::NumericalError,"Live coordinate difference overflow"};
     const bool new_knot=points_.empty() || p.position.x!=points_.back().position.x || p.position.y!=points_.back().position.y;
     try {
         // Prepare all potentially allocating changes BEFORE committing any state.
-        points_.reserve(points_.size()+1);
-        if(new_knot)knot_indices_.reserve(knot_indices_.size()+1);
+        reserve_one(points_,fitter_.max_samples());
+        if(new_knot)reserve_one(knot_indices_,fitter_.max_samples());
         FittedSpline next;
         if(new_knot && !points_.empty()){
             const std::size_t start=knot_indices_.size()>3 ? knot_indices_.size()-3 : 0;
@@ -196,7 +209,7 @@ core::Result<void> IncrementalSplineBuilder::append(const SplinePoint& p){
             const std::size_t replace=knot_indices_.size()>1 ? knot_indices_.size()-2 : 0;
             const std::size_t old_segments=cached_.segments_.size();
             if(old_segments!=knot_indices_.size()-1)return Error{ErrorCode::InvalidState,"Incremental cache inconsistent"};
-            cached_.segments_.reserve(old_segments+1);
+            reserve_one(cached_.segments_,fitter_.max_samples());
             double replaced_length=0;
             for(std::size_t i=replace;i<old_segments;++i)replaced_length+=cached_.segments_[i].length;
             const std::size_t window_offset=replace-start;
@@ -268,7 +281,7 @@ core::Result<FittedSpline> IncrementalSplineBuilder::tail_preview() const{
         std::vector<SplinePoint> tail;
         tail.reserve(knot_indices_.size()-start+1);
         for(std::size_t i=start;i<knot_indices_.size();++i)tail.push_back(points_[knot_indices_[i]]);
-        if(points_.back().timestamp>tail.back().timestamp)tail.push_back(points_.back());
+        if(knot_indices_.back()!=points_.size()-1)tail.push_back(points_.back());
         return fitter_.fit_world(tail);
     }catch(const std::bad_alloc&){return Error{ErrorCode::AllocationFailure,"Preview allocation failed"};}
      catch(const std::length_error&){return Error{ErrorCode::ResourceLimit,"Preview allocation limit"};}

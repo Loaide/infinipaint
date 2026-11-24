@@ -7,6 +7,10 @@ public:
     static core::Result<InputProcessor> create(OneEuroParams params = {}, std::size_t max_samples = 1000000);
     [[nodiscard]] core::Result<void> begin_stroke();
     [[nodiscard]] core::Result<CleanInputPoint> process(const RawInputPoint& raw);
+    // Called with reserved input slots and a candidate filter result. Failure
+    // leaves histories and filter unchanged. Success commits without allocation.
+    using BeforeCommit = core::Result<void>(*)(void*,const CleanInputPoint&);
+    [[nodiscard]] core::Result<CleanInputPoint> process(const RawInputPoint&, void*, BeforeCommit);
     [[nodiscard]] core::Result<CleanInputStroke> process_batch(const RawInputStroke& raw);
     [[nodiscard]] core::Result<CleanInputStroke> end_stroke();
     void cancel_stroke() noexcept;

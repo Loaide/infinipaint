@@ -422,6 +422,28 @@ void main() {
         ++trace.tailRevision;
     }
 
+    template<class T> void reserveExtra(std::vector<T>& v, size_t extra) {
+        if (extra > v.max_size()-v.size()) throw std::length_error("trace capacity");
+        if (v.capacity()-v.size() < extra)
+            v.reserve(std::max(v.size()+extra,v.size()+std::min(v.size(),v.max_size()-v.size())));
+    }
+    // Last fallible step of ingestion: reserve worst-case emission slots for
+    // one new stable and one replacement tail segment, then commit the spline.
+    core::Result<void> prepareSample(void* ctx, const input::CleanInputPoint& c) {
+        auto& t=*static_cast<Trace*>(ctx);
+        try {
+            reserveExtra(t.rawPoints,2); reserveExtra(t.cleanPoints,2);
+            reserveExtra(t.rawMesh,6); reserveExtra(t.cleanMesh,6);
+            reserveExtra(t.stableMesh,32*6);
+            if(t.tailMesh.capacity()<48*6) t.tailMesh.reserve(48*6);
+        } catch(const std::bad_alloc&) {
+            return core::Error{core::ErrorCode::AllocationFailure,"Trace allocation failed"};
+        } catch(const std::length_error&) {
+            return core::Error{core::ErrorCode::ResourceLimit,"Trace capacity limit"};
+        }
+        return t.spline.append({c.position,c.timestamp,c.pressure,c.tilt_x,c.tilt_y,c.speed});
+    }
+
 // --------------------------------------------------
 // GPU drawing
 // --------------------------------------------------
@@ -713,14 +735,12 @@ Java_com_infinipaint_demo_NativeBridge_sample(
         return JNI_FALSE;
     }
 
-    // Android timestamps are millisecond-resolution; historical and current
-    // samples can share a timestamp. The filter requires strict monotonicity.
+    // Original event times can tie; arrival order resolves the tie.
     if (!std::isfinite(time)) {
         __android_log_print(ANDROID_LOG_ERROR, "IP90_INPUT", "Native sample: non-finite timestamp");
         return JNI_FALSE;
     }
     if (trace.lastAcceptedTime >= 0.0 && time < trace.lastAcceptedTime) return JNI_FALSE;
-    const bool equalTimestamp = trace.lastAcceptedTime >= 0.0 && time == trace.lastAcceptedTime;
 
     input::RawInputPoint point{
             {worldX, worldY},
@@ -731,7 +751,7 @@ Java_com_infinipaint_demo_NativeBridge_sample(
     };
 
     const int64_t filterStartNs = profileNs();
-    auto clean = trace.input.process(point);
+    auto clean = trace.input.process(point,&trace,prepareSample);
     auditFilterNs.fetch_add(profileNs() - filterStartNs, std::memory_order_relaxed);
 
     if (!clean) {
@@ -773,29 +793,9 @@ Java_com_infinipaint_demo_NativeBridge_sample(
             trace.strokeRadiusWorld
     );
 
-    stroke::SplinePoint splinePoint{
-            c.position,
-            c.timestamp,
-            c.pressure,
-            c.tilt_x,
-            c.tilt_y,
-            c.speed
-    };
-
     const int64_t splineStartNs = profileNs();
-    // Spline fitter requires strictly increasing knot times. Preserve same-time
-    // raw and filtered samples; the live endpoint is drawn independently.
-    auto appended = equalTimestamp ? core::Result<void>{} : trace.spline.append(splinePoint);
-    if (!appended) {
-        auto err = appended.error();
-        __android_log_print(ANDROID_LOG_ERROR, "IP90_INPUT",
-                            "Native spline rejected: %.*s (code=%d)",
-                            (int)err.message.size(), err.message.data(), (int)err.code);
-        return JNI_FALSE;
-    }
-
     // Tessellate newly stable segments only, when the stable count advances.
-    if (!equalTimestamp && appended) buildStable(trace);
+    buildStable(trace);
     auditSplineNs.fetch_add(profileNs() - splineStartNs, std::memory_order_relaxed);
     auditStageSamples.fetch_add(1, std::memory_order_relaxed);
 
