@@ -1,4 +1,37 @@
-# M02 hardening — owner tablet-testing gate
+# M02 — accepted and complete, with documented limitations
+
+The owner completed physical acceptance on Samsung SM-X626B (Android 16, 2880 × 1800) and accepted M02. No closure blocker remains. This is milestone acceptance, not release approval or authorization to merge. On `feature/m02-live-ink`, closure verified the tested application `44f559b0d38c6ec0b194132df01569c7ee9bafec` is an ancestor of documentation checkpoint `767f8753f3854b67e8c8bc72a9f2b6f5d5877810`; only documentation changed between them. Local `app/build/outputs/apk/debug/app-debug.apk` matched owner-tested SHA-256 `1c8f6f3a835836e6d9dff8753db8d8563b25e2279223f224bd567092bb7aed43`. No new build, test run or device interaction at closure.
+
+## Physical tablet acceptance
+
+**Owner-reported:** active refresh 90 Hz during presentation captures; thermal status 0 at environment capture; window alpha bits=8, `max_blend=1`. Handwriting, perceived latency, pressure including stationary changes, corners, curves, pen-up consistency, AA, smoothing modes, accumulated strokes, zoom and pan passed. Physical dots were **inconclusive**, not failed; the separate automated Mesa dot checks passed. A minor pressure-transition irregularity was visible at magnification; cause unknown, deferral accepted.
+
+Long-stroke operation, stylus with palm, finger navigation and pointer transitions, rotation, split screen, background/foreground, lock/unlock, interrupted stroke, mode switching and repeated navigation passed. EGL recreation passed: process 17521 initialized rendering at 22:12:56, 22:14:49 and 22:15:11 on different rendering threads with unchanged coverage capabilities. The owner confirmed existing ink survived and interaction continued.
+
+**Idle:** 41,575 ms initially and 50,811 ms finally (92,386 ms total); both intervals had zero camera, stylus or other requests, zero callbacks and zero unmatched callbacks.
+
+**Active CPU telemetry:** each recent distribution has 512 observations; values below are p50 / p95 / p99 / max in ms. They measure native render calls and request-to-callback waits, not presentation or physical pen latency.
+
+|Interval|Duration ms|Requests / callbacks|Native render ms|Request-to-callback ms|
+|---|---:|---:|---|---|
+|Camera|36,480|1556 / 1556|0.139102 / 0.293203 / 1.692305 / 2.341758|0.656484 / 1.287578 / 1.962422 / 2.412226|
+|Writing|43,921|2829 / 2821|0.734531 / 1.549258 / 2.025586 / 3.037305|0.271875 / 1.433594 / 1.910703 / 7.307890|
+|Stress|130,770|10729 / 10729|0.342578 / 0.939883 / 1.404649 / 2.157461|0.284179 / 1.387226 / 1.726406 / 1.961172|
+
+Largest recorded individual stroke: 41,633 raw and filtered samples, 415,590 spline vertices, pen-up mutex hold 21.289 µs and acquisition wait 0.820 µs. Stress included multiple strokes; an uninterrupted two-minute individual stroke is **unverified**. Repeated GPU windows had zero reallocations and 120 incremental appends; largest live upload window was 9,734,040 B, associated with growth. Cumulative maximum native render was 23.676406 ms, distinct from the recent-window maxima.
+
+**Actual presentation:** owner identified the canvas SurfaceView BLAST layer. Recalculation from the two local SurfaceFlinger captures used their 11,111,111 ns period, adjacent differences of the second timestamp column after excluding the `INT64_MAX` pending sentinel, and nearest-rank percentiles. Both contain 126 valid presented frames / 125 intervals. Rate = intervals / elapsed seconds.
+
+|Activity|Elapsed s|FPS|Min / p50 / p95 / p99 / max interval (ms)|Apparent missed refresh opportunities|
+|---|---:|---:|---|---:|
+|Continuous writing|1.387378789|90.09796|10.809453 / 11.098477 / 11.182070 / 11.339296 / 11.345312|0|
+|Camera navigation|1.409543438|88.68120|10.993086 / 11.102109 / 11.196211 / 22.123359 / 22.154414|2; cause unestablished|
+
+Local capture identities (untracked, left unchanged): `m02-writing-presentation.txt` SHA-256 `571ade827949af43f3970879e943878fc19968566a021de14d07c646cd71b861`; `m02-camera-presentation.txt` SHA-256 `a02b5905064139796ee528602065c3175a2fbce5c83f617209a40c31f23516d4`. These are short active windows, not sustained arbitrary-workload benchmarks or physical pen-to-photon measurements.
+
+**Accepted limits and deferred probes:** the maximum raw-to-filtered deviation of 137.1237 px requires matched zoom and smoothing context; it does not diagnose the pressure observation. Capacity-growth spikes, occasional CPU stalls, per-stroke coverage cost, extreme-zoom tessellation and precision limits remain. No million-stroke claim. Device fallback cost is untested (MAX was active); first completed-frame payload and complete memory scaling were not directly measured on the tablet. No independent pen-to-photon test or sustained thermal benchmark. The owner did not supply a matched audit/screenshot series or individual results for every subcase of the [tablet checklist](../docs/M02_TABLET.md); subpixel comparisons, exact offscreen/cache/Clear sequences and any other unreported probes remain **unverified on device**, not inferred passes. The automated evidence below remains separate. ADR-006 stays deferred: single-backend tablet data is not a comparable cross-backend driver workload. No approved decision changed.
+
+## Prior implementation and automated evidence (pre-acceptance)
 
 Branch `feature/m02-live-ink`; clean recovery at `6da9d96dfbcb76fd3bc26ce4832a9de5fa78b456`, following tested integration `57e12c4524a40e388c99c9a916a2817d2e8000b1`. The accepted `main` baseline is `410a49446abddbb46dd26144ff82ff7a4aae8675`. Input history, M01 scheduling and the diagnostic backend are preserved. [Earlier measurements, failure tests and evidence boundaries](M02_INITIAL.md) remain available. None of these host measurements establish Android presentation or pen-to-photon latency.
 
@@ -53,4 +86,4 @@ W01 project usage snapshots at AA checkpoint and integration prep: 433 → 454 s
 
 Graphics review of `captures/m02-aa.diff` found no blocker, requested proof of actual fallback branch and cross-path banding checks, and flagged Android window alpha and fallback cost. Both paths now assert the selected branch; actual window/driver validation remains a gate. Performance review of `captures/m02-perf-hardening.diff` identified excess tiny-stroke retained capacity, unsafe adoption after GL errors, conditional upload savings and missing parity/lifecycle evidence. Added the slack limit, error handling, ownership and coefficient parity fixtures. Reviewed changed renderer, spline, shader, EGL config, scaling/replay and mock/Mesa tests; no repeat architecture audit.
 
-ADR-006 remains deferred: no comparable target-driver workload across backends. Linear document traversal, limited world-float precision, synchronous capacity growth, conditional GPU residency and in-memory authoritative vectors remain diagnostic limits. No merge, push, release, install or tablet acceptance. Follow the [approved-device procedure](../docs/M02_TABLET.md) **only after separate install authorization**.
+At that pre-acceptance checkpoint, tablet testing was pending. The physical acceptance above supersedes that gate, not the measurement limits: linear document traversal, limited world-float precision, synchronous capacity growth, conditional GPU residency and in-memory authoritative vectors remain. No merge, push or release is authorized.
