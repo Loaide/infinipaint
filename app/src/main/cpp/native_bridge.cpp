@@ -140,12 +140,6 @@ namespace {
     uint64_t nextLiveGpuId = 1;
     uint64_t liveBufferReallocations = 0;
     uint64_t liveIncrementalUpdates = 0;
-    void deleteLiveGpuCache() {
-        for (auto& entry : gpuLive)
-            for (auto& part : entry.second)
-                if (part.vbo) glDeleteBuffers(1, &part.vbo);
-        gpuLive.clear();
-    }
 
 
 // Camera coordinates are in world-space pixels.
@@ -945,7 +939,7 @@ Java_com_infinipaint_demo_NativeBridge_clear(
 // --------------------------------------------------
 
 JNIEXPORT void JNICALL
-Java_com_infinipaint_demo_NativeBridge_surface(
+Java_com_infinipaint_demo_NativeBridge_resizeViewport(
         JNIEnv*,
         jclass,
         jint w,
@@ -956,22 +950,16 @@ Java_com_infinipaint_demo_NativeBridge_surface(
     height = std::max(1, (int)h);
 
     glViewport(0, 0, width, height);
+}
 
-    // GL resources are owned by this thread. Invalidate all cached VBOs.
-    deleteGpuCache();
-    deleteLiveGpuCache();
+JNIEXPORT void JNICALL
+Java_com_infinipaint_demo_NativeBridge_contextCreated(JNIEnv*, jclass) {
+    // Old EGL context already owns/disposes its objects. The same numeric
+    // names may identify unrelated objects in the newly current context.
+    gpuFinished.clear();
+    gpuLive.clear();
+    glFinishedCount = 0;
     gpuEpoch = 0;
-    // Recreate GL resources for the current context.
-    // This is safe after context loss and surface recreation.
-
-    if (program && glIsProgram(program)) {
-        glDeleteProgram(program);
-    }
-
-    if (buffer && glIsBuffer(buffer)) {
-        glDeleteBuffers(1, &buffer);
-    }
-
     program = 0;
     buffer = 0;
 

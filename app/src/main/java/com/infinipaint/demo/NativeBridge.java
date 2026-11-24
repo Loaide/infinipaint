@@ -16,7 +16,8 @@ public final class NativeBridge {
  public static native boolean end(int id);
  public static native void cancel(int id);
  public static native void clear();
- public static native void surface(int width,int height);
+ public static native void contextCreated();
+ public static native void resizeViewport(int width,int height);
  public static native void render(int mode);
 
 

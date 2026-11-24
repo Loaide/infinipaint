@@ -1,0 +1,30 @@
+name: Android debug
+on: [push, pull_request, workflow_dispatch]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Install pinned SDK components
+        run: sdkmanager 'platforms;android-35' 'build-tools;34.0.0' 'ndk;30.0.16248370' 'cmake;3.22.1'
+      - name: Build APK, run JVM tests and lint
+        run: bash gradlew --console=plain --stacktrace :app:assembleDebug :app:testDebugUnitTest :app:lintDebug
+      - name: Require executed tests (NO-SOURCE is not coverage)
+        run: |
+          python3 - <<'PY'
+          import glob, xml.etree.ElementTree as ET
+          cases = [case for path in glob.glob("app/build/test-results/testDebugUnitTest/TEST-*.xml")
+                   for case in ET.parse(path).iter("testcase") if case.find("skipped") is None]
+          print(f"Executed {len(cases)} debug JVM tests")
+          if not cases:
+              raise SystemExit("No debug JVM tests executed")
+          PY

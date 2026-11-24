@@ -17,14 +17,13 @@ import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 import android.widget.TextView;
 
+import java.io.FileDescriptor;
+import java.io.PrintWriter;
 import java.util.Locale;
 
 public final class MainActivity extends Activity {
 
     private static final String TAG = "IP90_INPUT";
-
-    private static final double MIN_ZOOM = 0.1;
-    private static final double MAX_ZOOM = 16.0;
 
     private GLSurfaceView gl;
     private TextView status;
@@ -39,28 +38,25 @@ public final class MainActivity extends Activity {
     private volatile int mode = 0;
     private boolean running = false;
 
-    private double panX = 0.0;
-    private double panY = 0.0;
-    private double zoom = 1.0;
+    private final CanvasCamera camera = new CanvasCamera();
 
     // Stylus drawing state.
     private int stylusId = -1;
 
     // Finger navigation state.
-    private int firstFingerId = -1;
-    private int secondFingerId = -1;
-
-    private float previousX;
-    private float previousY;
-    private float previousCx;
-    private float previousCy;
-    private float previousDistance;
+    private final FingerNavigation<MotionEvent> fingers = new FingerNavigation<>(camera,
+            new FingerNavigation.Points<MotionEvent>() {
+                public int indexOf(MotionEvent e, int id) { return e.findPointerIndex(id); }
+                public double x(MotionEvent e, int i) { return e.getX(i); }
+                public double y(MotionEvent e, int i) { return e.getY(i); }
+            });
 
     private long lastStylusHoverMs = Long.MIN_VALUE;
     private static final long HOVER_GRACE_MS = 500;
 
     private int frameCount = 0;
     private long fpsStart = 0;
+    private long previousRenderEndNs;
     private volatile float measuredFps = 0;
 
     private boolean isStylus(int tool) {
@@ -72,17 +68,51 @@ public final class MainActivity extends Activity {
         return tool == MotionEvent.TOOL_TYPE_FINGER;
     }
 
-    private volatile long lastRequestedFrameNs;
+    private final FrameTelemetry frames = new FrameTelemetry(System::nanoTime);
     // Event-driven: never render an unchanged canvas 90 times per second.
-    private void requestCanvasRender() {
+    private void requestCanvasRender(FrameTelemetry.Reason reason) {
         if (gl == null) return;
-        lastRequestedFrameNs = System.nanoTime();
+        frames.request(reason);
         gl.requestRender();
     }
 
+    @Override
+    public void dump(String prefix, FileDescriptor fd, PrintWriter out, String[] args) {
+        boolean mark = args != null && args.length == 1 && "ip-frames-mark".equals(args[0]);
+        if (!mark && (args == null || args.length != 1 || !"ip-frames".equals(args[0]))) {
+            super.dump(prefix, fd, out, args);
+            return;
+        }
+        FrameTelemetry.Snapshot s = frames.snapshot(mark);
+        out.printf(Locale.US, "%sIP_FRAMES camera=%d stylus=%d other=%d callbacks=%d withoutPending=%d%n",
+                prefix, s.camera, s.stylus, s.other, s.callbacks, s.withoutPending);
+        out.printf(Locale.US, "%sfirst_pending_to_callback samples=%d sum_ns=%d max_ns=%d "
+                        + "native_render samples=%d sum_ns=%d max_ns=%d%n",
+                prefix, s.matched, s.waitSumNs, s.waitMaxNs, s.renders, s.nativeSumNs, s.nativeMaxNs);
+        FrameTelemetry.Snapshot b = s.baseline;
+        if (b != null) {
+            out.printf(Locale.US, "%ssince_mark elapsed_ms=%d camera=%d stylus=%d other=%d "
+                            + "callbacks=%d withoutPending=%d%n",
+                    prefix, (s.nowNs - b.nowNs) / 1_000_000, s.camera - b.camera,
+                    s.stylus - b.stylus, s.other - b.other, s.callbacks - b.callbacks,
+                    s.withoutPending - b.withoutPending);
+        } else out.println(prefix + (mark ? "mark_set" : "no_mark"));
+    }
+
+    private void saveCamera(Bundle state) {
+        state.putDouble("cameraPanX", camera.panX());
+        state.putDouble("cameraPanY", camera.panY());
+        state.putDouble("cameraZoom", camera.zoom());
+    }
+
+    private void restoreCamera(Bundle state) {
+        camera.restore(state.getDouble("cameraPanX", 0), state.getDouble("cameraPanY", 0),
+                state.getDouble("cameraZoom", 1));
+    }
+
     private void updateCamera() {
-        NativeBridge.setCamera(panX, panY, zoom);
-        requestCanvasRender();
+        NativeBridge.setCamera(camera.panX(), camera.panY(), camera.zoom());
+        requestCanvasRender(FrameTelemetry.Reason.CAMERA);
     }
 
     private void updateStatusThrottled() {
@@ -99,7 +129,7 @@ public final class MainActivity extends Activity {
         status.setText(String.format(
                 Locale.US,
                 "Zoom %.2fx | Render %.0f Hz | %s",
-                zoom,
+                camera.zoom(),
                 measuredFps,
                 stylusId >= 0 ? "STYLUS DRAWING" : "READY"
         ));
@@ -139,7 +169,7 @@ public final class MainActivity extends Activity {
             resetFingers();
 
             sendStylusSample(e, index, -1);
-            requestCanvasRender();
+            requestCanvasRender(FrameTelemetry.Reason.STYLUS);
             updateStatus();
         } else {
             Log.e(TAG, "NativeBridge.begin rejected stylus");
@@ -245,7 +275,7 @@ public final class MainActivity extends Activity {
 
         sendStylusSample(e, index, -1);
         // One render request per MotionEvent, not per historical sample.
-        requestCanvasRender();
+        requestCanvasRender(FrameTelemetry.Reason.STYLUS);
     }
 
     private void finishStylus(MotionEvent e, int index) {
@@ -270,7 +300,7 @@ public final class MainActivity extends Activity {
 
         resetFingers();
         updateStatus();
-        requestCanvasRender();
+        requestCanvasRender(FrameTelemetry.Reason.STYLUS);
     }
 
     private void cancelStylus() {
@@ -278,7 +308,7 @@ public final class MainActivity extends Activity {
             int id = stylusId;
             stylusId = -1;
             NativeBridge.cancel(id);
-            requestCanvasRender();
+            requestCanvasRender(FrameTelemetry.Reason.STYLUS);
         }
         updateStatus();
     }
@@ -288,8 +318,7 @@ public final class MainActivity extends Activity {
     // --------------------------------------------
 
     private void resetFingers() {
-        firstFingerId = -1;
-        secondFingerId = -1;
+        fingers.cancel();
     }
 
     private boolean suppressFingers() {
@@ -300,55 +329,10 @@ public final class MainActivity extends Activity {
                 - lastStylusHoverMs < HOVER_GRACE_MS;
     }
 
-    private boolean getPinch(
-            MotionEvent e,
-            float[] out
-    ) {
-        int a = e.findPointerIndex(firstFingerId);
-        int b = e.findPointerIndex(secondFingerId);
-
-        if (a < 0 || b < 0) return false;
-
-        float ax = e.getX(a);
-        float ay = e.getY(a);
-
-        float bx = e.getX(b);
-        float by = e.getY(b);
-
-        out[0] = (ax + bx) * 0.5f;
-        out[1] = (ay + by) * 0.5f;
-        out[2] = (float) Math.hypot(
-                bx - ax,
-                by - ay
-        );
-
-        return true;
-    }
-
-    private final float[] pinch = new float[3];
-
     private void startFinger(MotionEvent e, int index) {
         if (suppressFingers()) return;
         if (!isFinger(e.getToolType(index))) return;
-
-        int id = e.getPointerId(index);
-
-        if (firstFingerId < 0) {
-            firstFingerId = id;
-            previousX = e.getX(index);
-            previousY = e.getY(index);
-            return;
-        }
-
-        if (secondFingerId < 0 && id != firstFingerId) {
-            secondFingerId = id;
-
-            if (getPinch(e, pinch)) {
-                previousCx = pinch[0];
-                previousCy = pinch[1];
-                previousDistance = Math.max(1f, pinch[2]);
-            }
-        }
+        fingers.down(e, e.getPointerId(index));
     }
 
     private void moveFingers(MotionEvent e) {
@@ -357,85 +341,14 @@ public final class MainActivity extends Activity {
             return;
         }
 
-        if (firstFingerId < 0) return;
-
-        if (secondFingerId >= 0) {
-            if (!getPinch(e, pinch)) {
-                resetFingers();
-                return;
-            }
-
-            float cx = pinch[0];
-            float cy = pinch[1];
-            float distance = Math.max(1f, pinch[2]);
-
-            double oldZoom = zoom;
-            double factor = distance / previousDistance;
-
-            double newZoom = Math.max(
-                    MIN_ZOOM,
-                    Math.min(MAX_ZOOM, oldZoom * factor)
-            );
-
-            // Keep the same world location under the
-            // moving midpoint of the two fingers.
-            panX += previousCx / oldZoom - cx / newZoom;
-            panY += previousCy / oldZoom - cy / newZoom;
-            zoom = newZoom;
-
-            previousCx = cx;
-            previousCy = cy;
-            previousDistance = distance;
-
+        if (fingers.move(e)) {
             updateCamera();
-            updateStatusThrottled();
-            return;
+            if (fingers.pinching()) updateStatusThrottled();
         }
-
-        int index = e.findPointerIndex(firstFingerId);
-
-        if (index < 0) {
-            resetFingers();
-            return;
-        }
-
-        float x = e.getX(index);
-        float y = e.getY(index);
-
-        // One-finger pan.
-        panX -= (x - previousX) / zoom;
-        panY -= (y - previousY) / zoom;
-
-        previousX = x;
-        previousY = y;
-
-        updateCamera();
     }
 
     private void liftFinger(MotionEvent e, int index) {
-        int liftedId = e.getPointerId(index);
-
-        if (liftedId != firstFingerId
-                && liftedId != secondFingerId) {
-            return;
-        }
-
-        // Re-anchor the remaining finger, avoiding jumps.
-        int remainingId = -1;
-
-        for (int i = 0; i < e.getPointerCount(); i++) {
-            if (i == index) continue;
-
-            if (isFinger(e.getToolType(i))) {
-                remainingId = e.getPointerId(i);
-                previousX = e.getX(i);
-                previousY = e.getY(i);
-                break;
-            }
-        }
-
-        firstFingerId = remainingId;
-        secondFingerId = -1;
+        fingers.up(e, e.getPointerId(index));
     }
 
     // --------------------------------------------
@@ -552,6 +465,11 @@ public final class MainActivity extends Activity {
     @Override
     public void onCreate(Bundle state) {
         super.onCreate(state);
+        if (state != null) {
+            mode = Math.max(0, Math.min(3, state.getInt("displayMode", 0)));
+            smoothingPreset = Math.max(0, Math.min(2, state.getInt("smoothingPreset", 1)));
+            restoreCamera(state);
+        }
         inputAudit = new InputAuditRecorder(this);
 
         getWindow().addFlags(
@@ -570,17 +488,12 @@ public final class MainActivity extends Activity {
 
         gl.setRenderer(new GLSurfaceView.Renderer() {
 
-            // Zero-initialized per renderer; only the GL thread updates this window.
-            private long renderWindowQueueNs, renderWindowNativeNs;
-            private int renderWindowQueueSamples, renderWindowCount;
-
             @Override
             public void onSurfaceCreated(
                     javax.microedition.khronos.opengles.GL10 unused,
                     javax.microedition.khronos.egl.EGLConfig config) {
 
-                // onSurfaceChanged follows this callback and initializes the
-                // renderer once at the actual viewport size.
+                NativeBridge.contextCreated();
             }
 
             @Override
@@ -589,7 +502,7 @@ public final class MainActivity extends Activity {
                     int w,
                     int h) {
 
-                NativeBridge.surface(w, h);
+                NativeBridge.resizeViewport(w, h);
                 runOnUiThread(() -> request90Hz());
             }
 
@@ -597,36 +510,23 @@ public final class MainActivity extends Activity {
             public void onDrawFrame(
                     javax.microedition.khronos.opengles.GL10 unused) {
 
+                frames.drawStarted();
                 long startNs = System.nanoTime();
                 NativeBridge.render(mode);
                 long endNs = System.nanoTime();
+                frames.rendered(endNs - startNs);
                 // Restart the FPS measurement after idle; a paused canvas
                 // should not make the next active stroke display 0 Hz.
-                if (fpsStart == 0 || endNs - fpsStart > 2_000_000_000L) {
+                if (previousRenderEndNs == 0 || endNs - previousRenderEndNs > 2_000_000_000L) {
                     fpsStart = endNs;
                     frameCount = 0;
-                }
-                frameCount++;
+                } else frameCount++;
+                previousRenderEndNs = endNs;
                 if (endNs - fpsStart >= 1_000_000_000L) {
                     measuredFps = frameCount * 1e9f / (endNs - fpsStart);
                     frameCount = 0;
                     fpsStart = endNs;
                     runOnUiThread(() -> { if (running) updateStatus(); });
-                }
-                long requestedNs = lastRequestedFrameNs;
-                if (requestedNs > 0 && startNs >= requestedNs && startNs - requestedNs < 100000000L) {
-                    renderWindowQueueNs += startNs - requestedNs;
-                    renderWindowQueueSamples++;
-                }
-                renderWindowNativeNs += endNs - startNs;
-                if (++renderWindowCount == 120) {
-                    android.util.Log.i("IP_FRAME_TIMING", String.format(java.util.Locale.US,
-                        "event_request_to_draw_avg_ms=%.3f native_render_avg_ms=%.3f queue_samples=%d " +
-                        "note=GLSurfaceView swaps after onDrawFrame; actual presentation not measured",
-                        renderWindowQueueSamples > 0 ? renderWindowQueueNs / (renderWindowQueueSamples*1e6) : -1.0,
-                        renderWindowNativeNs / 120e6, renderWindowQueueSamples));
-                    renderWindowQueueNs = renderWindowNativeNs = renderWindowQueueSamples = 0;
-                    renderWindowCount = 0;
                 }
             }
         });
@@ -686,7 +586,7 @@ public final class MainActivity extends Activity {
         modeButton.setOnClickListener(v -> {
             mode = (mode + 1) % 4;
             updateModeButton();
-            requestCanvasRender();
+            requestCanvasRender(FrameTelemetry.Reason.OTHER);
         });
 
         toolbar.addView(modeButton);
@@ -714,7 +614,7 @@ public final class MainActivity extends Activity {
             cancelStylus();
             resetFingers();
             NativeBridge.clear();
-            requestCanvasRender();
+            requestCanvasRender(FrameTelemetry.Reason.OTHER);
         });
 
         toolbar.addView(clearButton);
@@ -758,7 +658,7 @@ public final class MainActivity extends Activity {
 
         request90Hz();
 
-        requestCanvasRender();
+        requestCanvasRender(FrameTelemetry.Reason.OTHER);
     }
 
     @Override
@@ -771,5 +671,20 @@ public final class MainActivity extends Activity {
 
         gl.onPause();
         super.onPause();
+    }
+
+    @Override
+    protected void onSaveInstanceState(Bundle state) {
+        super.onSaveInstanceState(state);
+        saveCamera(state);
+        state.putInt("displayMode", mode);
+        state.putInt("smoothingPreset", smoothingPreset);
+    }
+
+    @Override
+    protected void onDestroy() {
+        // Finish any pending diagnostic write; don't retain a worker per rotation.
+        inputAudit.close();
+        super.onDestroy();
     }
 }
