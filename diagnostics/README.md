@@ -15,6 +15,8 @@ Uses production One-Euro, InputProcessor and IncrementalSplineBuilder without GL
 
 ### M02 integrated host suite
 
+The full run asserts the GLES MAX and extension-free paths independently. The second Mesa process hides the minmax extension and checks its reported path. `pixels` runs just these two pbuffer tests; `perf` runs the mock ownership/failure tests and scaling probes. The 2/255 tolerance is for equivalent geometry within the **same** path; MAX vs the portable quantized resolve uses its own half-step-plus-rounding criterion.
+
 On Linux/WSL run `NDK_HEADERS=/path/to/ndk/toolchains/llvm/prebuilt/HOST/sysroot/usr/include sh diagnostics/run_m02.sh` with GCC C++20, Mesa EGL/GL dispatch and swrast. Use LF shell scripts. Outputs use disposable scratch storage. Includes deterministic geometry/input tests, CSVs, strict mock bridge, allocation-failure checks, end/append benchmarks, and a separate real GLES2 Mesa pbuffer readback. `spline_scaling` without `--check` is the short baseline probe; the checked run also exercises 131072 samples. The pbuffer is software pixels, **not** a tablet driver or timing test.
 
 ## Native bridge / renderer logic regression (host)

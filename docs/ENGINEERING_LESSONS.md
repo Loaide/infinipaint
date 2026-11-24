@@ -1,5 +1,8 @@
 # Verified engineering lessons
 
+- A temporal stroke layer needs one coverage union **before** source-over. On an opaque RGBA8 canvas, scissored destination alpha can serve as disposable mask storage if restored to one before presentation. Check the actual window config; a linked shader in a pbuffer is not a window-surface test.
+- VBO byte counts are valid only for successfully uploaded immutable prefixes in the same context. Measure retained allocation **and** transferred payload; declining to adopt a large mostly empty buffer can be the better choice for a tiny stroke.
+
 - A four-knot fit is not enough to guarantee linear cumulative work: measure allocator traffic of the **retained** arrays too. Distinguish total requested bytes from peak live storage and inspect capacity-jump maxima as well as p99.
 - Test geometry at a tied timestamp by ordinal knot, not just by time. A time-only query cannot identify several distinct positions. Retain all samples, including stationary pressure changes; a dwell can deposit ink locally without widening the incoming segment.
 - Shader math needs pixel evidence. Use the Mesa pbuffer for deterministic readback, mock GLES for transfer/resource accounting and the tablet for driver and presentation claims. In particular, source-over AA at capsule intersections need not equal a single union coverage.

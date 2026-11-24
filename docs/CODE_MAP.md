@@ -12,3 +12,5 @@
 There is no durable document store or production spatial index in this baseline. See [decisions](DECISIONS.md) before changing architectural boundaries.
 
 M02: `native_bridge.cpp` owns sample preflight, capture-zoom tessellation, tapered capsule shaders and completed geometry publication. `stroke/spline.{cpp,hpp}` holds the ordered attribute history, cached Hermite coefficients and interpolation-error bound. `FrameTelemetry` exposes recent timing distributions only on dump. Start validation at `diagnostics/run_m02.sh` (input/faults/scaling, mock bridge and real Mesa pbuffer); see [tablet gate](M02_TABLET.md).
+
+Hardening: `coverageLayer` gathers one representation, accumulates into scissored window alpha and resolves in temporal order; `cacheFinished` conditionally adopts successful live VBO prefixes. `SplineFitter::coefficients` is shared by batch fitting and the fixed four-knot append workspace. `diagnostics/tessellation_probe.hpp` reports cap hits and interpolation error.
