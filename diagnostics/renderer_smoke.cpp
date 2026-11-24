@@ -83,11 +83,38 @@ void glEnable(GLenum) {}
 void glBlendFunc(GLenum,GLenum) {}
 }
 static void check(bool ok,const char* msg){if(!ok){std::fprintf(stderr,"FAIL: %s\n",msg);std::exit(1);}}
-int main(){
+#include <chrono>
+#include <algorithm>
+int main(int argc,char**){
     auto render=[](int mode){Java_com_infinipaint_demo_NativeBridge_render(nullptr,nullptr,mode);};
     auto sample=[](int n,double timestamp){return Java_com_infinipaint_demo_NativeBridge_sample(nullptr,nullptr,1,
         100+3*n,250+25*std::sin(n*0.13),timestamp,0.6f,0,0)==JNI_TRUE;};
     auto resize=[](int w,int h){Java_com_infinipaint_demo_NativeBridge_resizeViewport(nullptr,nullptr,w,h);};
+    if(argc>1) {
+        using clock=std::chrono::steady_clock;
+        for(int n:{256,4096}) {
+            std::vector<double> endUs, sampleUs;
+            for(int rep=0;rep<101;++rep) {
+                Java_com_infinipaint_demo_NativeBridge_clear(nullptr,nullptr);
+                check(Java_com_infinipaint_demo_NativeBridge_begin(nullptr,nullptr,1,2),"bench begin");
+                for(int i=0;i<n;++i) {
+                    auto start=clock::now();
+                    check(sample(i,12+i*.01),"bench sample");
+                    sampleUs.push_back(std::chrono::duration<double,std::micro>(clock::now()-start).count());
+                }
+                auto start=clock::now();
+                check(Java_com_infinipaint_demo_NativeBridge_end(nullptr,nullptr,1),"bench end");
+                endUs.push_back(std::chrono::duration<double,std::micro>(clock::now()-start).count());
+            }
+            for(auto* v:{&sampleUs,&endUs}) {
+                std::sort(v->begin(),v->end());
+                std::printf("n=%d %s_us p50/p95/p99/max %.3f %.3f %.3f %.3f\n",n,
+                    v==&endUs?"end":"sample",(*v)[v->size()/2],(*v)[v->size()*95/100],
+                    (*v)[v->size()*99/100],v->back());
+            }
+        }
+        return 0;
+    }
     auto createContext=[&]{
         buffers.clear();gpuContents.clear();boundBuffer=0;lastDrawBuffer=0;
         const auto deletes=deletedObjects;

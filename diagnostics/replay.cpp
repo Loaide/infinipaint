@@ -29,7 +29,6 @@ int main(int argc,char**argv){
     std::stof(fields[6]),std::stof(fields[7]),std::stof(fields[8])});}catch(...){}
  }
  if(rows.empty()){std::cerr<<"No accepted samples\n";return 4;}
- std::stable_sort(rows.begin(),rows.end(),[](auto&a,auto&b){return a.ns<b.ns;});
  // This replay processes one pointer at a time; multiple pointers are grouped by id.
  std::vector<int> ids;for(auto&r:rows)if(std::find(ids.begin(),ids.end(),r.id)==ids.end())ids.push_back(r.id);
  double filterUs=0,splineUs=0,filterSq=0,splineSq=0,maxFilter=0,maxSpline=0;
@@ -61,9 +60,11 @@ int main(int argc,char**argv){
   double snapshotUs=micros(a,b);
   if(!snapshot){std::cerr<<"Spline snapshot failed\n";continue;}
   auto&curve=snapshot.value();
+  size_t knot=0;
   for(size_t i=0;i<originals.size();++i){
    auto&r=originals[i];auto&c=clean[i];
-   auto eval=curve.evaluate_at_time(c.timestamp);
+   if(i && (c.position.x!=clean[i-1].position.x || c.position.y!=clean[i-1].position.y)) ++knot;
+   auto eval=knot ? curve.evaluate(knot-1,1.) : curve.evaluate(0,0.);
    double sx=std::nan(""),sy=std::nan(""),err=std::nan("");
    if(eval){sx=eval.value().position.x;sy=eval.value().position.y;
      err=std::hypot(sx-r.x,sy-r.y);splineSq+=err*err;maxSpline=std::max(maxSpline,err);splineCount++;}
@@ -79,5 +80,6 @@ int main(int argc,char**argv){
   <<" filter_max_deviation_px="<<maxFilter
   <<" spline_rms_deviation_px="<<(splineCount?std::sqrt(splineSq/splineCount):0)
   <<" spline_max_deviation_px="<<maxSpline<<"\n";
-  std::cout<<"Deviations are relative to raw, not ground truth. Time-only queries select the last sample at a tied instant.\n";
+  std::cout<<"Deviations at ordered knots are relative to raw, not ground truth or between-knot error.\n";
+  return failures?1:0;
 }

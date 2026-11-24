@@ -4,6 +4,7 @@
 #include "core/result.hpp"
 #include <vector>
 #include <cstddef>
+#include <algorithm>
 namespace engine::stroke {
 // Transform from Phase 1 view-local pixels into document-local world units.
 // Caller freezes this mapping for a stroke; camera changes require explicit handling upstream.
@@ -62,6 +63,21 @@ public:
     [[nodiscard]] core::Result<FittedSpline> snapshot() const;
     // Evaluate just cached geometry: O(1) with no full-history copy.
     [[nodiscard]] core::Result<core::Vec2> geometry_at(std::size_t segment, double u) const noexcept;
+    // For uniform parameter steps, linear interpolation error <= M/(8*n*n).
+    // P'' is affine: its norm is bounded by the larger endpoint norm.
+    [[nodiscard]] double linear_error_bound(std::size_t segment) const {
+        const auto& s=cached_.segments_.at(segment);
+        return std::max(std::hypot(2*s.c.x,2*s.c.y),
+            std::hypot(2*s.c.x+6*s.d.x,2*s.c.y+6*s.d.y))/8;
+    }
+    [[nodiscard]] float knot_pressure(std::size_t knot) const { return peak_pressure_.at(knot); }
+    [[nodiscard]] float arrival_pressure(std::size_t knot) const {return points_[knot_indices_[knot]].pressure;}
+    [[nodiscard]] float departure_pressure(std::size_t segment) const {return points_[knot_indices_[segment+1]-1].pressure;}
+    static constexpr int max_steps=64;
+    [[nodiscard]] int tessellation_steps(std::size_t segment,double tolerance) const {
+        return (int)std::clamp(std::ceil(std::sqrt(linear_error_bound(segment)/tolerance)),
+                               1.,double(max_steps));
+    }
     [[nodiscard]] std::size_t segment_count() const noexcept { return cached_.segments_.size(); }
     // A provisional, independently fitted tail. NOT geometrically identical to
     // cached segments at its truncated left boundary. The caller must replace
@@ -75,12 +91,13 @@ public:
         return distinct_count_ > 2 ? distinct_count_ - 2 : 0;
     }
     [[nodiscard]] std::size_t sample_count() const noexcept { return points_.size(); }
-    void reset() noexcept { points_.clear(); knot_indices_.clear(); cached_ = FittedSpline{}; distinct_count_ = 0; }
+    void reset() noexcept { points_.clear(); knot_indices_.clear(); peak_pressure_.clear(); cached_ = FittedSpline{}; distinct_count_ = 0; }
 private:
     SplineFitter fitter_;
     std::vector<SplinePoint> points_;
     std::size_t distinct_count_ = 0;
     std::vector<std::size_t> knot_indices_;
+    std::vector<float> peak_pressure_; // ink deposited during a stationary dwell
     FittedSpline cached_;
 };
 }

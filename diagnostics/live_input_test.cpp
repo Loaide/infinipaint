@@ -37,5 +37,25 @@ int main() {
     p.cancel_stroke(); b.reset();
     assert(!sample(0,0,1));
     assert(p.begin_stroke() && sample(4,0,1).value().position.x==4);
+    stroke::IncrementalSplineBuilder loop(stroke::SplineFitter::create().value());
+    double t=0;
+    for(auto v:std::vector<core::Vec2>{{2,2},{42,3},{40,44},{42,3},{2,2},{-40,40}}) {
+        assert(loop.append({v,t++,.5f,0,0,0}));
+    }
+    assert(loop.append({{-40,40},t,1.f,0,0,0}));
+    assert(loop.knot_pressure(loop.segment_count())==1.f);
+    for(size_t s=0;s<loop.segment_count();++s) {
+        int n=loop.tessellation_steps(s,.2);
+        assert(n<loop.max_steps);
+        for(int k=0;k<n;++k) {
+            auto a=loop.geometry_at(s,double(k)/n).value();
+            auto z=loop.geometry_at(s,double(k+1)/n).value();
+            for(int j=1;j<32;++j) {
+                double u=j/32.;
+                auto v=loop.geometry_at(s,(k+u)/n).value();
+                assert(std::hypot(v.x-std::lerp(a.x,z.x,u),v.y-std::lerp(a.y,z.y,u))<=.2);
+            }
+        }
+    }
     std::puts("PASS ordered ties, reversal, invalid/regressing samples, downstream rejection, cancellation");
 }

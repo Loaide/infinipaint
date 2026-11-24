@@ -30,7 +30,7 @@ namespace {
         float x, y;
         float u, v;
         float len;
-        float radius;
+        float radius, endRadius;
         float dirX, dirY;
     };
 
@@ -54,6 +54,8 @@ namespace {
 
         double lastAcceptedTime = -1.0;
         float strokeRadiusWorld = 1.9f;
+        float rawPeak = 0, cleanPeak = 0;
+        float lastRadius = 0;
         double deviationSum = 0.0;
         double deviationMax = 0.0;
         double originalDeviationMax = 0.0;
@@ -182,7 +184,7 @@ namespace {
 attribute vec2 aPos;
 attribute vec2 aLocal;
 attribute float aLength;
-attribute float aRadius;
+attribute vec2 aRadius;
 attribute vec2 aDir;
 
 uniform vec2 uScreen;
@@ -191,13 +193,13 @@ uniform float uCameraZoom;
 
 varying vec2 vLocal;
 varying float vLength;
-varying float vRadius;
+varying vec2 vRadius;
 
 void main() {
     // Expand the segment on the GPU at the CURRENT zoom. Avoid the old
     // min-zoom world-space padding that produced gigantic overdraw when
     // zooming in on a drawing.
-    float pad = aRadius + 1.0 / uCameraZoom;
+    float pad = max(aRadius.x,aRadius.y) + 1.0 / uCameraZoom;
     float along = aLocal.x * (aLength + 2.0 * pad) - pad;
     float across = aLocal.y * pad;
     vec2 normal = vec2(-aDir.y, aDir.x);
@@ -225,18 +227,27 @@ uniform vec4 uColor;
 
 varying vec2 vLocal;
 varying float vLength;
-varying float vRadius;
+varying vec2 vRadius;
 
 void main() {
 
-    float dx =
-        vLocal.x - clamp(vLocal.x, 0.0, vLength);
-
-    float d = length(vec2(dx, vLocal.y));
+    // Distance to the union of discs swept along a linear radius ramp.
+    float dr = vRadius.y-vRadius.x;
+    float center = 0.0;
+    if (abs(dr) >= vLength) {
+        center = dr > 0.0 ? vLength : 0.0;
+    } else {
+        float slope = dr/vLength;
+        center = clamp(vLocal.x + abs(vLocal.y)*slope/
+                       sqrt(max(0.0001,1.0-slope*slope)),0.0,vLength);
+    }
+    float radius = vLength > 0.0 ? mix(vRadius.x,vRadius.y,center/vLength)
+                                  : max(vRadius.x,vRadius.y);
+    float d = length(vec2(vLocal.x-center,vLocal.y));
 
     float a = 1.0 - smoothstep(
-        vRadius - 0.75,
-        vRadius + 0.75,
+        radius - 0.75,
+        radius + 0.75,
         d
     );
 
@@ -295,7 +306,7 @@ void main() {
             float ay,
             float bx,
             float by,
-            float radius
+            float radius, float endRadius=-1
     ) {
 
         float dx = bx - ax;
@@ -315,7 +326,7 @@ void main() {
         // Six GPU-expanded vertices; constant-size topology independent of
         // camera zoom. Every fragment covers only the stroke + ~1px AA.
         auto make = [&](float u, float v) -> Vertex {
-            return {ax, ay, u, v, len, radius, dx, dy};
+            return {ax, ay, u, v, len, radius, endRadius<0?radius:endRadius, dx, dy};
         };
         mesh.insert(mesh.end(), {
             make(0.0f, -1.0f), make(1.0f, -1.0f), make(1.0f, 1.0f),
@@ -328,7 +339,7 @@ void main() {
             Mesh& mesh,
             float x,
             float y,
-            float radius
+            float radius,float& peak,float departure
     ) {
 
         if (!points.empty()) {
@@ -336,18 +347,19 @@ void main() {
             float px = points[points.size() - 2];
             float py = points.back();
 
-            if (std::hypot(px - x, py - y) >= 0.03f) {
-
+            if (px!=x || py!=y) {
+                if(peak>departure) quad(mesh,px,py,px,py,peak);
                 quad(
                         mesh,
                         px,
                         py,
                         x,
                         y,
-                        radius
+                        departure,radius
                 );
-            }
-        }
+                peak=radius;
+            } else peak=std::max(radius,peak);
+        } else peak=radius;
 
         points.push_back(x);
         points.push_back(y);
@@ -357,54 +369,33 @@ void main() {
 // Incremental spline visualization
 // --------------------------------------------------
 
-    // Diagnostic full-curve tessellation. Called on completion, or only
-    // while spline mode is selected for a live stroke.
-    Mesh makeSplineMesh(const Trace& trace) {
-        Mesh mesh;
-        auto result = trace.spline.snapshot();
-        if (!result) return mesh;
-        const auto& curve = result.value();
-        for (size_t seg = 0; seg < curve.segment_count(); ++seg) {
-            auto first = curve.evaluate(seg, 0.0);
-            auto last = curve.evaluate(seg, 1.0);
-            if (!first || !last) continue;
-            float px = (float)first.value().position.x;
-            float py = (float)first.value().position.y;
-            double chord = std::hypot(last.value().position.x - px,
-                                      last.value().position.y - py);
-            int steps = std::clamp((int)(chord / 2.0) + 2, 6, 64);
-            for (int k = 1; k <= steps; ++k) {
-                auto pt = curve.evaluate(seg, (double)k / steps);
-                if (!pt) continue;
-                float x = (float)pt.value().position.x;
-                float y = (float)pt.value().position.y;
-                quad(mesh, px, py, x, y, trace.strokeRadiusWorld);
-                px = x; py = y;
-            }
-        }
-        if (mesh.empty() && !trace.cleanPoints.empty()) {
-            // Dots and strokes with insufficient distinct knots.
-            const auto& p = trace.cleanPoints;
-            quad(mesh, p[0], p[1], p[0], p[1], trace.strokeRadiusWorld);
-        }
-        return mesh;
+    float brushRadius(const Trace& t,float pressure) {
+        return t.strokeRadiusWorld*(0.35f+1.15f*pressure);
     }
+    constexpr int maxSteps=stroke::IncrementalSplineBuilder::max_steps;
 
     void tessellateSegment(Mesh& mesh, const Trace& trace,
-                           size_t segment, int minSteps, int maxSteps, double pixelStep) {
+                           size_t segment) {
         auto first = trace.spline.geometry_at(segment, 0.0);
         auto last = trace.spline.geometry_at(segment, 1.0);
         if (!first || !last) return;
         float px = (float)first.value().x;
         float py = (float)first.value().y;
-        const double chord = std::hypot(last.value().x - px, last.value().y - py);
-        int steps = std::clamp((int)(chord / pixelStep) + 2, minSteps, maxSteps);
+        const double tolerance=.20*trace.strokeRadiusWorld/1.9; // at capture zoom
+        int steps=trace.spline.tessellation_steps(segment,tolerance);
+        float startRadius=brushRadius(trace,trace.spline.departure_pressure(segment));
+        float endRadius=brushRadius(trace,trace.spline.arrival_pressure(segment+1));
+        float peak=brushRadius(trace,trace.spline.knot_pressure(segment));
+        if(peak>startRadius) quad(mesh,px,py,px,py,peak);
+        float radius=startRadius;
         for (int k = 1; k <= steps; ++k) {
             auto value = trace.spline.geometry_at(segment, (double)k / steps);
             if (!value) continue;
             const float x = (float)value.value().x;
             const float y = (float)value.value().y;
-            quad(mesh, px, py, x, y, trace.strokeRadiusWorld);
+            float next=std::lerp(startRadius,endRadius,(float)k/steps);
+            quad(mesh, px, py, x, y, radius,next);
+            radius=next;
             px = x; py = y;
         }
     }
@@ -412,13 +403,13 @@ void main() {
     void buildStable(Trace& trace) {
         const size_t stable = trace.spline.stable_segment_count();
         for (size_t i = trace.stableBuilt; i < stable; ++i)
-            tessellateSegment(trace.stableMesh, trace, i, 4, 32, 3.0);
+            tessellateSegment(trace.stableMesh, trace, i);
         trace.stableBuilt = stable;
         // The last segment is provisional until another knot arrives. Rebuild
         // only this small tail; the long stable part is strictly append-only.
         trace.tailMesh.clear();
         for (size_t i = stable; i < trace.spline.segment_count(); ++i)
-            tessellateSegment(trace.tailMesh, trace, i, 6, 48, 2.0);
+            tessellateSegment(trace.tailMesh, trace, i);
         ++trace.tailRevision;
     }
 
@@ -431,11 +422,17 @@ void main() {
     // one new stable and one replacement tail segment, then commit the spline.
     core::Result<void> prepareSample(void* ctx, const input::CleanInputPoint& c) {
         auto& t=*static_cast<Trace*>(ctx);
+        const bool moving=t.input.clean_samples().empty() ||
+            t.input.clean_samples().back().position.x!=c.position.x ||
+            t.input.clean_samples().back().position.y!=c.position.y;
         try {
             reserveExtra(t.rawPoints,2); reserveExtra(t.cleanPoints,2);
-            reserveExtra(t.rawMesh,6); reserveExtra(t.cleanMesh,6);
-            reserveExtra(t.stableMesh,32*6);
-            if(t.tailMesh.capacity()<48*6) t.tailMesh.reserve(48*6);
+            reserveExtra(t.rawMesh,18); reserveExtra(t.cleanMesh,24);
+            if(moving && !t.input.clean_samples().empty()) {
+                constexpr size_t maxPart=(maxSteps+1)*6;
+                reserveExtra(t.stableMesh,2*maxPart+12);
+                if(t.tailMesh.capacity()<maxPart) t.tailMesh.reserve(maxPart);
+            } else reserveExtra(t.stableMesh,12);
         } catch(const std::bad_alloc&) {
             return core::Error{core::ErrorCode::AllocationFailure,"Trace allocation failed"};
         } catch(const std::length_error&) {
@@ -478,7 +475,7 @@ void main() {
 
         glVertexAttribPointer(
                 radiusLoc,
-                1,
+                2,
                 GL_FLOAT,
                 GL_FALSE,
                 sizeof(Vertex),
@@ -593,6 +590,7 @@ void main() {
         float filteredX = 0.0f, filteredY = 0.0f;
         bool hasLast = false, hasFiltered = false;
         float radiusWorld = 1.9f;
+        float filteredRadius = 1.9f;
     };
 
 } // namespace
@@ -750,9 +748,10 @@ Java_com_infinipaint_demo_NativeBridge_sample(
             ty
     };
 
+    const size_t oldSegments=trace.spline.segment_count();
     const int64_t filterStartNs = profileNs();
     auto clean = trace.input.process(point,&trace,prepareSample);
-    auditFilterNs.fetch_add(profileNs() - filterStartNs, std::memory_order_relaxed);
+    const int64_t commitNs=profileNs()-filterStartNs;
 
     if (!clean) {
         auto err = clean.error();
@@ -763,6 +762,7 @@ Java_com_infinipaint_demo_NativeBridge_sample(
         return JNI_FALSE;
     }
     trace.lastAcceptedTime = time;
+    auditFilterNs.fetch_add(commitNs,std::memory_order_relaxed);
 
     // Immediate ink uses actual input positions.
 
@@ -771,7 +771,7 @@ Java_com_infinipaint_demo_NativeBridge_sample(
             trace.rawMesh,
             (float)worldX,
             (float)worldY,
-            trace.strokeRadiusWorld
+            brushRadius(trace,pressure),trace.rawPeak,trace.lastRadius
     );
 
     auto c = clean.value();
@@ -790,12 +790,14 @@ Java_com_infinipaint_demo_NativeBridge_sample(
             trace.cleanMesh,
             (float)c.position.x,
             (float)c.position.y,
-            trace.strokeRadiusWorld
+            brushRadius(trace,pressure),trace.cleanPeak,trace.lastRadius
     );
 
     const int64_t splineStartNs = profileNs();
     // Tessellate newly stable segments only, when the stable count advances.
-    buildStable(trace);
+    trace.lastRadius=brushRadius(trace,pressure);
+    if(trace.spline.segment_count()!=oldSegments)
+        buildStable(trace);
     auditSplineNs.fetch_add(profileNs() - splineStartNs, std::memory_order_relaxed);
     auditStageSamples.fetch_add(1, std::memory_order_relaxed);
 
@@ -841,16 +843,8 @@ Java_com_infinipaint_demo_NativeBridge_end(
                             100.0 * trace.wouldExceedLimit / trace.deviationCount,
                             1.9 / trace.strokeRadiusWorld);
     }
-    // Keep all three representations after the pen lifts.
-    if (!trace.rawPoints.empty() && trace.rawMesh.empty()) {
-        quad(trace.rawMesh, trace.rawPoints[0], trace.rawPoints[1],
-             trace.rawPoints[0], trace.rawPoints[1], trace.strokeRadiusWorld);
-    }
-    if (!trace.cleanPoints.empty() && trace.cleanMesh.empty()) {
-        quad(trace.cleanMesh, trace.cleanPoints[0], trace.cleanPoints[1],
-             trace.cleanPoints[0], trace.cleanPoints[1], trace.strokeRadiusWorld);
-    }
-    Mesh splineMesh = makeSplineMesh(trace);
+    auto& splineMesh=trace.stableMesh;
+    splineMesh.insert(splineMesh.end(),trace.tailMesh.begin(),trace.tailMesh.end());
     // Preserve the physical final pen position even if Android supplied
     // multiple different positions with the same timestamp.
     if (trace.rawPoints.size() >= 2 && trace.cleanPoints.size() >= 2) {
@@ -859,9 +853,11 @@ Java_com_infinipaint_demo_NativeBridge_end(
         const float cx = trace.cleanPoints[trace.cleanPoints.size()-2];
         const float cy = trace.cleanPoints.back();
         if (std::hypot(rx-cx, ry-cy) > 0.03f) {
-            quad(trace.cleanMesh, cx, cy, rx, ry, trace.strokeRadiusWorld);
-            quad(splineMesh, cx, cy, rx, ry, trace.strokeRadiusWorld);
+            quad(trace.cleanMesh, cx, cy, rx, ry, trace.cleanPeak,trace.rawPeak);
+            quad(splineMesh, cx, cy, rx, ry, trace.cleanPeak,trace.rawPeak);
         }
+        for(auto* mesh:{&trace.rawMesh,&trace.cleanMesh,&splineMesh})
+            quad(*mesh,rx,ry,rx,ry,trace.rawPeak);
     }
     const size_t rawSamples = trace.rawPoints.size() / 2;
     const size_t cleanSamples = trace.cleanPoints.size() / 2;
@@ -878,7 +874,7 @@ Java_com_infinipaint_demo_NativeBridge_end(
         for (const Vertex& v : *mesh) {
             const float bx = v.x + v.dirX * v.len;
             const float by = v.y + v.dirY * v.len;
-            const float pad = v.radius + 1.0f / (float)MIN_ZOOM;
+            const float pad = std::max(v.radius,v.endRadius) + 1.0f / (float)MIN_ZOOM;
             minX = std::min(minX, std::min(v.x, bx) - pad);
             minY = std::min(minY, std::min(v.y, by) - pad);
             maxX = std::max(maxX, std::max(v.x, bx) + pad);
@@ -1154,7 +1150,8 @@ Java_com_infinipaint_demo_NativeBridge_render(
             auto& trace = *pair.second;
 
             ViewTrace view;
-            view.radiusWorld = trace.strokeRadiusWorld;
+            view.radiusWorld = trace.rawPeak;
+            view.filteredRadius = trace.cleanPeak;
             if (mode == 0 || mode == 3)
                 view.raw = snapshotUpload(trace.rawMesh, trace.gpuId, 0);
             if (mode == 1 || mode == 3)
@@ -1265,37 +1262,30 @@ Java_com_infinipaint_demo_NativeBridge_render(
     for (auto& entry : active) {
         const uint64_t strokeId = entry.first;
         auto& trace = entry.second;
-        if (mode == 0) drawLive(strokeId, 0, trace.raw, 0.20f, 0.95f, 0.78f);
-        else if (mode == 1) {
-            drawLive(strokeId, 1, trace.clean, 1.0f, 0.76f, 0.20f);
-        }
-        else if (mode == 2) {
-            drawLive(strokeId, 2, trace.stable, 0.28f, 0.58f, 1.0f);
-            drawLive(strokeId, 3, trace.tail, 0.28f, 0.58f, 1.0f);
-        }
-        else {
-            drawLive(strokeId, 2, trace.stable, 0.28f, 0.58f, 1.0f);
-            drawLive(strokeId, 3, trace.tail, 0.28f, 0.58f, 1.0f);
-            drawLive(strokeId, 1, trace.clean, 1.0f, 0.76f, 0.20f);
-            drawLive(strokeId, 0, trace.raw, 0.20f, 0.95f, 0.78f);
-        }
-
-        // Show the latest raw input point immediately.
-
-        if (trace.hasLast) {
-
+        auto tip=[&](bool connector,float r,float g,float b) {
+            if(!trace.hasLast) return;
             Mesh dot;
-
-            if ((mode == 1 || mode == 2) && trace.hasFiltered &&
+            if (connector && trace.hasFiltered &&
                 std::hypot(trace.lastX-trace.filteredX, trace.lastY-trace.filteredY) > 0.03f)
                 quad(dot, trace.filteredX, trace.filteredY,
-                     trace.lastX, trace.lastY, trace.radiusWorld);
+                     trace.lastX, trace.lastY, trace.filteredRadius,trace.radiusWorld);
             quad(dot, trace.lastX, trace.lastY,
                  trace.lastX, trace.lastY, trace.radiusWorld);
 
-            draw(dot, mode == 1 ? 1.0f : (mode == 2 ? 0.28f : 0.20f),
-                 mode == 1 ? 0.76f : (mode == 2 ? 0.58f : 0.95f),
-                 mode == 1 ? 0.20f : (mode == 2 ? 1.0f : 0.78f));
+            draw(dot,r,g,b);
+        };
+        if(mode==2 || mode==3) {
+            drawLive(strokeId,2,trace.stable,.28f,.58f,1.f);
+            drawLive(strokeId,3,trace.tail,.28f,.58f,1.f);
+            tip(true,.28f,.58f,1.f);
+        }
+        if(mode==1 || mode==3) {
+            drawLive(strokeId,1,trace.clean,1.f,.76f,.20f);
+            tip(true,1.f,.76f,.20f);
+        }
+        if(mode==0 || mode==3) {
+            drawLive(strokeId,0,trace.raw,.20f,.95f,.78f);
+            tip(false,.20f,.95f,.78f);
         }
     }
     const double renderCpuMs = (profileNs() - frameStartNs) / 1e6;
@@ -1321,7 +1311,7 @@ Java_com_infinipaint_demo_NativeBridge_render(
         const int64_t snapshotNs = auditSnapshotNs.exchange(0, std::memory_order_relaxed);
         const uint64_t snapshotFrames = auditSnapshotFrames.exchange(0, std::memory_order_relaxed);
         __android_log_print(ANDROID_LOG_INFO, "IP_PIPELINE",
-            "samples=%llu mutex_wait_avg_us=%.2f filter_avg_us=%.2f spline_append_tessellate_avg_us=%.2f snapshot_avg_us=%.2f (CPU only; not display presentation)",
+            "samples=%llu mutex_wait_avg_us=%.2f input_reserve_spline_commit_avg_us=%.2f tessellate_avg_us=%.2f snapshot_avg_us=%.2f (CPU only; not display presentation)",
             (unsigned long long)stageSamples,
             stageSamples ? (double)waitNs / stageSamples / 1000.0 : -1.0,
             stageSamples ? (double)filterNs / stageSamples / 1000.0 : -1.0,

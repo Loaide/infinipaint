@@ -143,7 +143,7 @@ core::Result<StrokeSample> FittedSpline::evaluate(std::size_t segment,double u) 
     const auto& a=source_[s.left];const auto& b=source_[s.right];
     if (a.timestamp==b.timestamp) {
         const auto& end=(u==1 && segment+1==segments_.size()) ? source_.back() : b;
-        return StrokeSample{pos,tangent,a.timestamp,interp(a.pressure,end.pressure,u),
+        return StrokeSample{pos,tangent,interp(a.timestamp,end.timestamp,u),interp(a.pressure,end.pressure,u),
             interp(a.tilt_x,end.tilt_x,u),interp(a.tilt_y,end.tilt_y,u),interp(a.speed,end.speed,u)};
     }
     // For the terminal endpoint, include pressure/tilt updates received while
@@ -151,6 +151,10 @@ core::Result<StrokeSample> FittedSpline::evaluate(std::size_t segment,double u) 
     // accessible through evaluate_at_time().
     const double time=(segment+1==segments_.size() && u==1.0)
         ? source_.back().timestamp : interp(a.timestamp,b.timestamp,u);
+    if (u==0 || u==1) {
+        const auto& endpoint=u==0?a:(segment+1==segments_.size()?source_.back():b);
+        return StrokeSample{pos,tangent,endpoint.timestamp,endpoint.pressure,endpoint.tilt_x,endpoint.tilt_y,endpoint.speed};
+    }
     auto attrs=evaluate_at_time(time);
     if(!attrs)return attrs.error();
     auto sample=attrs.value();sample.position=pos;sample.tangent=tangent;
@@ -193,7 +197,10 @@ core::Result<void> IncrementalSplineBuilder::append(const SplinePoint& p){
     try {
         // Prepare all potentially allocating changes BEFORE committing any state.
         reserve_one(points_,fitter_.max_samples());
-        if(new_knot)reserve_one(knot_indices_,fitter_.max_samples());
+        if(new_knot) {
+            reserve_one(knot_indices_,fitter_.max_samples());
+            reserve_one(peak_pressure_,fitter_.max_samples());
+        }
         FittedSpline next;
         if(new_knot && !points_.empty()){
             const std::size_t start=knot_indices_.size()>3 ? knot_indices_.size()-3 : 0;
@@ -238,6 +245,7 @@ core::Result<void> IncrementalSplineBuilder::append(const SplinePoint& p){
             // Commit is non-throwing after reserve (POD segments, bounded capacity).
             points_.push_back(p);
             knot_indices_.push_back(points_.size()-1);
+            peak_pressure_.push_back(p.pressure);
             cached_.segments_.resize(replace);
             for(std::size_t i=window_offset;i<next.segments_.size();++i)cached_.segments_.push_back(next.segments_[i]);
             cached_.total_length_=total;
@@ -249,8 +257,9 @@ core::Result<void> IncrementalSplineBuilder::append(const SplinePoint& p){
         if(new_knot){
             knot_indices_.push_back(points_.size()-1);
             cached_.origin_=p.position;
+            peak_pressure_.push_back(p.pressure);
             ++distinct_count_;
-        }
+        } else peak_pressure_.back()=std::max(peak_pressure_.back(),p.pressure);
         return {};
     }catch(const std::bad_alloc&){return Error{ErrorCode::AllocationFailure,"Live stroke allocation failed"};}
      catch(const std::length_error&){return Error{ErrorCode::ResourceLimit,"Live stroke size limit"};}
