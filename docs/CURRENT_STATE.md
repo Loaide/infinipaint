@@ -1,7 +1,7 @@
-# Current state — Android baseline stabilization
+# Current state — M01 owner-test candidate
 
-M00 is approved as an audit. Its no-checkout finding describes the earlier snapshot. The M00.5 repair on `fix/android-baseline` is based on `568163c0f984f024731f8a32cb129865aed690d9`, verified against GitHub `refs/heads/main` at stabilization time.
+M00.5 was accepted on tablet and merged into `main` at `db36eaba697ef46beb14f77e396405d7af20cf65`. The owner authorized M01 on the Java/C++/GLES2 baseline; this is not a new production backend decision.
 
-The local repair restores the four renderer-owned frame-timing accumulators and resets them together after every 120 callbacks. No stylus, filtering, spline, renderer API, native code, storage or Gradle configuration changed. See the [stabilization handoff](../reports/LATEST.md) for verification and remaining limits; the [M00 audit](M00_AUDIT.md) remains historical evidence.
+M01 is locally implemented and host-verified: one production navigation camera, pointer-ID gesture handling, saved view settings, context-specific resource initialization, on-demand frame counters, JVM tests and Android CI configuration. Only one diagnostic canvas may own the process-wide native state. See the [checkpoint and next action](SESSION_HANDOFF.md) and [test evidence](../reports/LATEST.md).
 
-M00.5 accepted after owner tablet testing; tested commit `8bca6fc0be92f8f3fd0f8ad169d80c48e7442914` was pushed without force to `origin/fix/android-baseline`. See [session handoff](SESSION_HANDOFF.md) for automated results, owner observations, limitations and next actions. No merge into `main` or M01 start authorized.
+No M01 tablet result or remote CI run yet. Documents remain in-memory, GPU coordinates remain world floats, and large-scene performance is unmeasured. No merge, push or later milestone is authorized.
