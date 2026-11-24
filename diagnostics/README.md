@@ -11,7 +11,11 @@ bash diagnostics/run_replay.sh diagnostics/synthetic_input.csv /tmp/ip_replay.cs
 bash diagnostics/run_replay.sh diagnostics/synthetic_same_timestamp.csv /tmp/ip_replay_same.csv
 ```
 
-Uses original C++ One-Euro, InputProcessor, and IncrementalSplineBuilder without GLES; results show processing time and deviation from *raw*, not ground-truth geometric accuracy. Replay uses its own filter default parameters unless explicitly changed in the replay source; the UI's selectable presets are in `native_bridge.cpp`. The same-timestamp replay leaves native raw timestamps unchanged while skipping equal-time knots for spline fitting.
+Uses production One-Euro, InputProcessor and IncrementalSplineBuilder without GLES. Replay groups by pointer in arrival order, preserves ties and compares ordered knot positions against the same raw records. These errors are not ground truth or between-knot errors. Replay parameters differ from selectable UI presets.
+
+### M02 integrated host suite
+
+On Linux/WSL run `NDK_HEADERS=/path/to/ndk/toolchains/llvm/prebuilt/HOST/sysroot/usr/include sh diagnostics/run_m02.sh` with GCC C++20, Mesa EGL/GL dispatch and swrast. Use LF shell scripts. Outputs use disposable scratch storage. Includes deterministic geometry/input tests, CSVs, strict mock bridge, allocation-failure checks, end/append benchmarks, and a separate real GLES2 Mesa pbuffer readback. `spline_scaling` without `--check` is the short baseline probe; the checked run also exercises 131072 samples. The pbuffer is software pixels, **not** a tablet driver or timing test.
 
 ## Native bridge / renderer logic regression (host)
 

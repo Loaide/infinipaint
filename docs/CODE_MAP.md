@@ -10,3 +10,5 @@
 |Build/CI and engineering workflow|Gradle wrapper, `.github/workflows/android.yml`, `scripts/engineering.ps1`, `opencode.json`, `.opencode/agents/`|[Workflow commands and activation](W01_WORKFLOW.md)|
 
 There is no durable document store or production spatial index in this baseline. See [decisions](DECISIONS.md) before changing architectural boundaries.
+
+M02: `native_bridge.cpp` owns sample preflight, capture-zoom tessellation, tapered capsule shaders and completed geometry publication. `stroke/spline.{cpp,hpp}` holds the ordered attribute history, cached Hermite coefficients and interpolation-error bound. `FrameTelemetry` exposes recent timing distributions only on dump. Start validation at `diagnostics/run_m02.sh` (input/faults/scaling, mock bridge and real Mesa pbuffer); see [tablet gate](M02_TABLET.md).
