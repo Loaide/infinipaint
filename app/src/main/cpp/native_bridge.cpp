@@ -140,6 +140,7 @@ namespace {
         std::shared_ptr<const Mesh> clean;
         std::shared_ptr<const Mesh> spline;
         float minX = 0, minY = 0, maxX = 0, maxY = 0;
+        uint64_t liveId=0;
     };
     std::deque<FinishedTrace> finished;
     // Stable IDs are assigned under stateMutex; GPU resources live only on GL thread.
@@ -617,7 +618,11 @@ void main() {
         glBindBuffer(GL_ARRAY_BUFFER, cached.vbo);
         const size_t n = mesh.total;
         if (n > cached.capacityVertices) {
-            const size_t cap = std::max(n, std::max(size_t(256), cached.capacityVertices * 2));
+            // Leave bounded room for the terminal tail and cursor when a
+            // coalesced frame is the first upload of a long live prefix.
+            const size_t finishRoom=part==2 ? (maxSteps+1)*6+12 : part==3 ? 0 : 12;
+            const size_t cap = std::max(n+std::min(finishRoom,std::max(size_t(12),n/8)),
+                                        std::max(size_t(256), cached.capacityVertices * 2));
             glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(cap * sizeof(Vertex)), nullptr, GL_DYNAMIC_DRAW);
             cached.capacityVertices = cap;
             ++liveBufferReallocations;
@@ -628,6 +633,11 @@ void main() {
             frameUploadBytes += mesh.data.size() * sizeof(Vertex);
             liveUploadBytes += mesh.data.size() * sizeof(Vertex);
             if (mesh.offset > 0) ++liveIncrementalUpdates;
+            if(glGetError()!=GL_NO_ERROR) {
+                // Includes failed storage allocation. Do not publish a prefix
+                // length for bytes the driver did not accept. Retry from zero.
+                glDeleteBuffers(1,&cached.vbo); cached={}; return;
+            }
         }
         cached.uploadedVertices = n;
         cached.revision = mesh.revision;
@@ -647,6 +657,20 @@ void main() {
         item.minX = trace.minX; item.minY = trace.minY;
         item.maxX = trace.maxX; item.maxY = trace.maxY;
         gpuFinished.push_back(std::move(item));
+        auto previous=gpuLive.find(trace.liveId);
+        if(previous==gpuLive.end()) return;
+        auto& completed=gpuFinished.back();
+        for(size_t i=0;i<3;++i) {
+            auto& prefix=previous->second[i];
+            const auto n=completed.source[i]->size();
+            if(prefix.vbo && prefix.uploadedVertices<=n && n<=prefix.capacityVertices &&
+               prefix.capacityVertices-n<=n/2) {
+                // Same logical prefix, same EGL context, single GL owner.
+                // Never adopt provisional part 3; its contents are replaceable.
+                completed.vbo[i]=std::exchange(prefix.vbo,0);
+                completed.count[i]=(GLsizei)prefix.uploadedVertices;
+            }
+        }
     }
 
     void drawFinishedPart(CachedGpuStroke& item, int part, float r, float g, float b) {
@@ -658,9 +682,23 @@ void main() {
             glBindBuffer(GL_ARRAY_BUFFER, item.vbo[part]);
             const size_t bytes = vertices.size() * sizeof(Vertex);
             glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)bytes, vertices.data(), GL_STATIC_DRAW);
+            if(glGetError()!=GL_NO_ERROR) {
+                glDeleteBuffers(1,&item.vbo[part]); item.vbo[part]=0; item.count[part]=0; return;
+            }
             item.count[part] = (GLsizei)vertices.size();
             frameUploadBytes += bytes;
             cacheUploadBytes += bytes;
+        } else if((size_t)item.count[part]<vertices.size()) {
+            const size_t prefix=item.count[part];
+            const size_t bytes=(vertices.size()-prefix)*sizeof(Vertex);
+            glBindBuffer(GL_ARRAY_BUFFER,item.vbo[part]);
+            glBufferSubData(GL_ARRAY_BUFFER,(GLintptr)(prefix*sizeof(Vertex)),(GLsizeiptr)bytes,vertices.data()+prefix);
+            if(glGetError()!=GL_NO_ERROR) {
+                glDeleteBuffers(1,&item.vbo[part]); item.vbo[part]=0; item.count[part]=0; return;
+            }
+            item.count[part]=(GLsizei)vertices.size();
+            frameUploadBytes+=bytes;
+            cacheUploadBytes+=bytes;
         }
         drawCached(item.vbo[part], item.count[part], r, g, b);
     }
@@ -954,7 +992,7 @@ Java_com_infinipaint_demo_NativeBridge_end(
     ink->derived={std::move(trace.rawMesh),std::move(trace.cleanMesh),std::move(splineMesh)};
     const auto& b=trace.bounds;
     finished.back()={{ink,&ink->raw},{ink,&ink->derived[0]},{ink,&ink->derived[1]},
-                     {ink,&ink->derived[2]},b.minX,b.minY,b.maxX,b.maxY};
+                     {ink,&ink->derived[2]},b.minX,b.minY,b.maxX,b.maxY,trace.gpuId};
     auto retired=std::move(it->second); // release mutable histories outside lock
     live.erase(it);
     const auto held=profileNs()-lockStart;

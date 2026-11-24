@@ -1,5 +1,6 @@
 #include "input/input_processor.hpp"
 #include "stroke/spline.hpp"
+#include "tessellation_probe.hpp"
 #include <cassert>
 #include <limits>
 #include <cstdio>
@@ -44,6 +45,42 @@ int main() {
     }
     assert(loop.append({{-40,40},t,1.f,0,0,0}));
     assert(loop.knot_pressure(loop.segment_count())==1.f);
+    assert(inspectTessellation("tight-loop",loop)==0);
+    for(double extent:{2000.,40000.}) {
+        stroke::IncrementalSplineBuilder leap(stroke::SplineFitter::create().value());
+        double time=0;
+        for(auto v:std::vector<core::Vec2>{{0,0},{extent,0},{extent,extent},{0,extent},{extent,extent}})
+            assert(leap.append({v,time++,.5f,0,0,0}));
+        const auto hits=inspectTessellation(extent==2000.?"tablet-scale-leaps":"40k-leaps",leap);
+        assert(extent==40000. ? hits>0 : hits==0);
+    }
+    for(auto mode:{stroke::Parameterization::Uniform,stroke::Parameterization::Chordal,
+                   stroke::Parameterization::Centripetal}) {
+        stroke::SplineFitter::Params fp; fp.parameterization=mode;
+        const auto fitter=stroke::SplineFitter::create(fp).value();
+        stroke::IncrementalSplineBuilder live(fitter);
+        std::vector<stroke::SplinePoint> points;
+        std::vector<core::Vec2> stable;
+        for(auto v:std::vector<core::Vec2>{{0,0},{1,.01},{1,.01},{9,10},{1,.01},{-55,72},{100,-1}}) {
+            points.push_back({v,1,.5f,0,0,0});
+            assert(live.append(points.back()));
+            const auto batch=fitter.fit_world(points).value();
+            assert(batch.segment_count()==live.segment_count());
+            assert(std::abs(batch.approximate_length()-live.snapshot().value().approximate_length())<1e-9);
+            for(size_t k=0;k<live.segment_count();++k) for(double u:{0.,.25,.5,.75,1.}) {
+                auto a=batch.evaluate(k,u).value().position;
+                auto b=live.geometry_at(k,u).value();
+                assert(core::Vec2::distance(a,b)<1e-10);
+            }
+            for(size_t k=0;k<stable.size();++k)
+                assert(core::Vec2::distance(stable[k],live.geometry_at(k,.5).value())==0.);
+            while(stable.size()<live.stable_segment_count())
+                stable.push_back(live.geometry_at(stable.size(),.5).value());
+        }
+    }
+    stroke::IncrementalSplineBuilder collapsed(stroke::SplineFitter::create().value());
+    assert(collapsed.append({{0x1p60,0},1,.5f,0,0,0}) && collapsed.append({{0,0},2,.5f,0,0,0}));
+    assert(!collapsed.append({{1,0},3,.5f,0,0,0}) && collapsed.sample_count()==2);
     for(size_t s=0;s<loop.segment_count();++s) {
         int n=loop.tessellation_steps(s,.2);
         assert(n<loop.max_steps);

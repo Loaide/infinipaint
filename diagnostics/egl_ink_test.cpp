@@ -343,6 +343,27 @@ void measureJoinAA() {
     };
     compare(corner(false),corner(true));
 }
+void comparePortableRamp() {
+    const char* path=std::getenv("IP_RAMP_REFERENCE");
+    if(!path) return;
+    clear(); begin(1);
+    sample(1,10,20,1,0); sample(1,117,31,1,1); end(1);
+    const Frame frame=render(raw);
+    if(observedMax) {
+        FILE* f=std::fopen(path,"wb");
+        check(f && std::fwrite(frame.data(),sizeof(Frame),1,f)==1,"write diagonal reference");
+        std::fclose(f);
+    } else {
+        Frame ref;
+        FILE* f=std::fopen(path,"rb");
+        check(f && std::fread(ref.data(),sizeof(Frame),1,f)==1,"read diagonal reference");
+        std::fclose(f);
+        int max=0;
+        for(size_t i=0;i<frame.size();++i) max=std::max(max,rgbDelta(frame[i],ref[i]));
+        std::printf("diagonal taper fallback vs MAX max RGB delta=%d/255\n",max);
+        check(max<=10,"fallback exceeds half a coverage step plus rounding");
+    }
+}
 } // namespace
 
 int main() {
@@ -382,6 +403,7 @@ int main() {
     testCompletedOrder(background);
     testDwell(background);
     measureJoinAA();
+    comparePortableRamp();
     clear();
     check(render(composite) == blank, "JNI clear left ink in the framebuffer");
     std::puts("PASS: production GLES2 shader, pressure dots/taper, pen-up, and completed order");

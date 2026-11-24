@@ -8,6 +8,7 @@
 #include <algorithm>
 #include "input/input_processor.hpp"
 #include "stroke/spline.hpp"
+#include "tessellation_probe.hpp"
 using Clock=std::chrono::steady_clock;
 static double micros(Clock::time_point a,Clock::time_point b){return std::chrono::duration<double,std::micro>(b-a).count();}
 struct Sample { int id; long long ns; double x,y; float p,tx,ty; };
@@ -60,6 +61,7 @@ int main(int argc,char**argv){
   double snapshotUs=micros(a,b);
   if(!snapshot){std::cerr<<"Spline snapshot failed\n";continue;}
   auto&curve=snapshot.value();
+  inspectTessellation(argv[1],builder);
   size_t knot=0;
   for(size_t i=0;i<originals.size();++i){
    auto&r=originals[i];auto&c=clean[i];

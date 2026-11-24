@@ -27,12 +27,15 @@ typedef unsigned int GLenum; typedef unsigned int GLuint;typedef int GLint;typed
 #define GL_ONE_MINUS_DST_ALPHA 0x0305
 #define GL_ZERO 0
 #define GL_TRUE 1
+#define GL_NO_ERROR 0
+#define GL_OUT_OF_MEMORY 0x0505
 #ifdef __cplusplus
 extern "C" {
 #endif
 void glDisable(GLenum);void glScissor(GLint,GLint,GLsizei,GLsizei);void glColorMask(GLboolean,GLboolean,GLboolean,GLboolean);
 void glBlendEquation(GLenum);void glBlendFuncSeparate(GLenum,GLenum,GLenum,GLenum);void glUniform1i(GLint,GLint);
 const unsigned char* glGetString(GLenum);void glGetIntegerv(GLenum,GLint*);
+GLenum glGetError(void);
 GLuint glCreateShader(GLenum);void glShaderSource(GLuint,GLsizei,const GLchar*const*,const GLint*);void glCompileShader(GLuint);void glGetShaderiv(GLuint,GLenum,GLint*);void glGetShaderInfoLog(GLuint,GLsizei,GLsizei*,GLchar*);void glDeleteShader(GLuint);GLuint glCreateProgram(void);void glAttachShader(GLuint,GLuint);void glBindAttribLocation(GLuint,GLuint,const GLchar*);void glLinkProgram(GLuint);void glGetProgramiv(GLuint,GLenum,GLint*);void glGetProgramInfoLog(GLuint,GLsizei,GLsizei*,GLchar*);void glDeleteProgram(GLuint);GLboolean glIsProgram(GLuint);GLboolean glIsBuffer(GLuint);void glDeleteBuffers(GLsizei,const GLuint*);void glGenBuffers(GLsizei,GLuint*);void glBindBuffer(GLenum,GLuint);void glBufferData(GLenum,GLsizeiptr,const void*,GLenum);void glBufferSubData(GLenum,GLintptr,GLsizeiptr,const void*);void glViewport(GLint,GLint,GLsizei,GLsizei);GLint glGetAttribLocation(GLuint,const GLchar*);GLint glGetUniformLocation(GLuint,const GLchar*);void glUseProgram(GLuint);void glUniform4f(GLint,GLfloat,GLfloat,GLfloat,GLfloat);void glUniform2f(GLint,GLfloat,GLfloat);void glUniform1f(GLint,GLfloat);void glVertexAttribPointer(GLuint,GLint,GLenum,GLboolean,GLsizei,const void*);void glEnableVertexAttribArray(GLuint);void glDrawArrays(GLenum,GLint,GLsizei);void glClearColor(GLfloat,GLfloat,GLfloat,GLfloat);void glClear(GLbitfield);void glEnable(GLenum);void glBlendFunc(GLenum,GLenum);
 #ifdef __cplusplus
 }

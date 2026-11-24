@@ -1,5 +1,6 @@
 #include "stroke/spline.hpp"
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <limits>
 #include <new>
@@ -98,11 +99,26 @@ core::Result<FittedSpline> SplineFitter::fit_world(const std::vector<SplinePoint
         if(unique.size()<2)return out; // stationary stroke: retain ALL attribute samples, render as dot later
         const std::size_t n=unique.size();
         std::vector<double> h(n-1);
+        out.segments_.resize(n-1);
+        auto length=coefficients(unique,h,out.segments_);
+        if(!length)return length.error();
+        out.total_length_=length.value();
+        for(std::size_t i=0;i+1<n;++i) {
+            out.segments_[i].left=indices[i];
+            out.segments_[i].right=indices[i+1];
+        }
+        return out;
+    }catch(const std::bad_alloc&){return Error{ErrorCode::AllocationFailure,"Spline allocation failed"};}
+     catch(const std::length_error&){return Error{ErrorCode::ResourceLimit,"Spline allocation limit"};}
+}
+core::Result<double> SplineFitter::coefficients(std::span<const Vec2> unique,std::span<double> h,
+                                                std::span<FittedSpline::Segment> segments) const {
+        const size_t n=unique.size();
+        double total=0;
         for(std::size_t i=0;i+1<n;++i){
             h[i]=knot_step(unique[i],unique[i+1],params_.parameterization);
             if(!std::isfinite(h[i])||h[i]<=0)return Error{ErrorCode::NumericalError,"Invalid spline knot interval"};
         }
-        out.segments_.reserve(n-1);
         for(std::size_t i=0;i+1<n;++i){
             Vec2 d0,d1;
             if(i==0)d0=mul(sub(unique[1],unique[0]),1.0/h[0]);
@@ -118,13 +134,11 @@ core::Result<FittedSpline> SplineFitter::fit_world(const std::vector<SplinePoint
             const Vec2 d=add(mul(delta,-2),add(m0,m1));
             if(!finite(b)||!finite(c)||!finite(d))return Error{ErrorCode::NumericalError,"Spline coefficient overflow"};
             const double len=length_adaptive(p0,b,c,d,0,1,p0,cubic(p0,b,c,d,1),params_.arc_tolerance,params_.max_arc_depth);
-            if(!std::isfinite(len)||!std::isfinite(out.total_length_+len))return Error{ErrorCode::NumericalError,"Spline length overflow"};
-            out.segments_.push_back({p0,b,c,d,indices[i],indices[i+1],len});
-            out.total_length_+=len;
+            if(!std::isfinite(len)||!std::isfinite(total+len))return Error{ErrorCode::NumericalError,"Spline length overflow"};
+            segments[i]={p0,b,c,d,0,0,len};
+            total+=len;
         }
-        return out;
-    }catch(const std::bad_alloc&){return Error{ErrorCode::AllocationFailure,"Spline allocation failed"};}
-     catch(const std::length_error&){return Error{ErrorCode::ResourceLimit,"Spline allocation limit"};}
+        return total;
 }
 core::Result<StrokeSample> FittedSpline::evaluate(std::size_t segment,double u) const noexcept{
     if(!std::isfinite(u)||u<0||u>1)return Error{ErrorCode::InvalidArgument,"Evaluation parameter outside [0,1]"};
@@ -201,16 +215,17 @@ core::Result<void> IncrementalSplineBuilder::append(const SplinePoint& p){
             reserve_one(knot_indices_,fitter_.max_samples());
             reserve_one(peak_pressure_,fitter_.max_samples());
         }
-        FittedSpline next;
         if(new_knot && !points_.empty()){
             const std::size_t start=knot_indices_.size()>3 ? knot_indices_.size()-3 : 0;
-            std::vector<SplinePoint> window;
-            window.reserve(knot_indices_.size()-start+1);
-            for(std::size_t i=start;i<knot_indices_.size();++i)window.push_back(points_[knot_indices_[i]]);
-            window.push_back(p);
-            auto r=fitter_.fit_world(window);
+            const size_t count=knot_indices_.size()-start;
+            const Vec2 origin=points_[knot_indices_[start]].position;
+            std::array<Vec2,4> window;
+            std::array<double,3> intervals;
+            std::array<FittedSpline::Segment,3> next;
+            for(size_t i=0;i<count;++i)window[i]=sub(points_[knot_indices_[start+i]].position,origin);
+            window[count]=sub(p.position,origin);
+            auto r=fitter_.coefficients(std::span(window).first(count+1),intervals,next);
             if(!r)return r.error();
-            next=std::move(r.value());
             // The new knot changes the previously terminal segment and adds one.
             // Earlier segments retain their four geometric neighbors unchanged.
             const std::size_t replace=knot_indices_.size()>1 ? knot_indices_.size()-2 : 0;
@@ -221,7 +236,7 @@ core::Result<void> IncrementalSplineBuilder::append(const SplinePoint& p){
             for(std::size_t i=replace;i<old_segments;++i)replaced_length+=cached_.segments_[i].length;
             const std::size_t window_offset=replace-start;
             double added_length=0;
-            for(std::size_t i=window_offset;i<next.segments_.size();++i)added_length+=next.segments_[i].length;
+            for(std::size_t i=window_offset;i<count;++i)added_length+=next[i].length;
             // Incremental length accounting may accumulate floating-point
             // rounding; a rare negative result is recovered from segments.
             double total=cached_.total_length_-replaced_length+added_length;
@@ -234,20 +249,20 @@ core::Result<void> IncrementalSplineBuilder::append(const SplinePoint& p){
             }
             if(!std::isfinite(total)||total<0)return Error{ErrorCode::NumericalError,"Incremental length overflow"};
             // Translate coefficients to the stable document-local origin.
-            const Vec2 shift=sub(next.origin_,cached_.origin_);
+            const Vec2 shift=sub(origin,cached_.origin_);
             if(!finite(shift))return Error{ErrorCode::NumericalError,"Incremental origin overflow"};
-            for(std::size_t i=window_offset;i<next.segments_.size();++i){
-                next.segments_[i].a=add(next.segments_[i].a,shift);
-                if(!finite(next.segments_[i].a))return Error{ErrorCode::NumericalError,"Incremental coefficient overflow"};
-                next.segments_[i].left=knot_indices_[start+i];
-                next.segments_[i].right=(start+i+1==knot_indices_.size())?points_.size():knot_indices_[start+i+1];
+            for(std::size_t i=window_offset;i<count;++i){
+                next[i].a=add(next[i].a,shift);
+                if(!finite(next[i].a))return Error{ErrorCode::NumericalError,"Incremental coefficient overflow"};
+                next[i].left=knot_indices_[start+i];
+                next[i].right=(start+i+1==knot_indices_.size())?points_.size():knot_indices_[start+i+1];
             }
             // Commit is non-throwing after reserve (POD segments, bounded capacity).
             points_.push_back(p);
             knot_indices_.push_back(points_.size()-1);
             peak_pressure_.push_back(p.pressure);
             cached_.segments_.resize(replace);
-            for(std::size_t i=window_offset;i<next.segments_.size();++i)cached_.segments_.push_back(next.segments_[i]);
+            for(std::size_t i=window_offset;i<count;++i)cached_.segments_.push_back(next[i]);
             cached_.total_length_=total;
             ++distinct_count_;
             return {};

@@ -32,6 +32,7 @@ void Java_com_infinipaint_demo_NativeBridge_setSmoothingPreset(JNIEnv*,jclass,ji
 jboolean Java_com_infinipaint_demo_NativeBridge_begin(JNIEnv*,jclass,jint,jint);
 jboolean Java_com_infinipaint_demo_NativeBridge_sample(JNIEnv*,jclass,jint,jdouble,jdouble,jdouble,jfloat,jfloat,jfloat);
 jboolean Java_com_infinipaint_demo_NativeBridge_end(JNIEnv*,jclass,jint);
+void Java_com_infinipaint_demo_NativeBridge_cancel(JNIEnv*,jclass,jint);
 void Java_com_infinipaint_demo_NativeBridge_clear(JNIEnv*,jclass);
 void Java_com_infinipaint_demo_NativeBridge_render(JNIEnv*,jclass,jint);
 }
@@ -44,6 +45,18 @@ static GLsizei viewportWidth = 0, viewportHeight = 0;
 static GLfloat uniformPanX, uniformPanY, uniformZoom;
 static std::map<unsigned,std::vector<uint8_t>> gpuContents;
 static long long lastHoldNs;
+static size_t usedBytes;
+static size_t clearedPixels=0,scissorPixels=0;
+static unsigned maskClears=0,errorChecks=0;
+static bool scissored=false;
+static bool failUpload=false;
+static GLenum uploadError=GL_NO_ERROR;
+static GLsizei stride;
+static std::vector<uint8_t> drawnVertices() {
+    const auto& storage=gpuContents.at(lastDrawBuffer);
+    if(usedBytes>storage.size()) std::abort();
+    return {storage.begin(),storage.begin()+usedBytes};
+}
 static long long lastWaitNs;
 extern "C" {
 int __android_log_print(int,const char* tag,const char* fmt,...) {
@@ -77,6 +90,7 @@ void glBufferData(GLenum,GLsizeiptr size,const void* ptr,GLenum){
     if(ptr){transferBytes+=size;std::memcpy(bytes.data(),ptr,(size_t)size);}
 }
 void glBufferSubData(GLenum,GLintptr offset,GLsizeiptr size,const void* data) {
+    if(failUpload) {failUpload=false;uploadError=GL_OUT_OF_MEMORY;return;}
     transferBytes+=size;
     auto& bytes=gpuContents[boundBuffer];
     if(offset+size>(GLintptr)bytes.size())std::abort();
@@ -93,16 +107,16 @@ void glUseProgram(GLuint) {}
 void glUniform4f(GLint,GLfloat,GLfloat,GLfloat,GLfloat) {}
 void glUniform2f(GLint loc,GLfloat x,GLfloat y) {if(loc==1){uniformPanX=x;uniformPanY=y;}}
 void glUniform1f(GLint loc,GLfloat z) {if(loc==2)uniformZoom=z;}
-void glVertexAttribPointer(GLuint,GLint,GLenum,GLboolean,GLsizei,const void*) {}
+void glVertexAttribPointer(GLuint,GLint,GLenum,GLboolean,GLsizei s,const void*) {stride=s;}
 void glEnableVertexAttribArray(GLuint) {}
 static unsigned resolves=0;
-void glDrawArrays(GLenum,GLint,GLsizei) {
+void glDrawArrays(GLenum,GLint,GLsizei n) {
     if(!boundBuffer) {++resolves;return;}
-    ++draws;lastDrawBuffer=boundBuffer;
+    ++draws;lastDrawBuffer=boundBuffer;usedBytes=size_t(n)*stride;
 }
-void glScissor(GLint,GLint,GLsizei,GLsizei) {}
+void glScissor(GLint,GLint,GLsizei w,GLsizei h) {scissorPixels=size_t(w)*h;}
 void glColorMask(GLboolean,GLboolean,GLboolean,GLboolean) {}
-void glDisable(GLenum) {}
+void glDisable(GLenum cap) {if(cap==GL_SCISSOR_TEST)scissored=false;}
 void glBlendEquation(GLenum) {}
 void glBlendFuncSeparate(GLenum,GLenum,GLenum,GLenum) {}
 void glUniform1i(GLint,GLint) {}
@@ -110,9 +124,10 @@ const unsigned char* glGetString(GLenum id) {
     return (const unsigned char*)(id==GL_VERSION?"OpenGL ES 2.0":"GL_EXT_blend_minmax");
 }
 void glGetIntegerv(GLenum,GLint* value){*value=8;}
+GLenum glGetError(){++errorChecks;GLenum result=uploadError;uploadError=GL_NO_ERROR;return result;}
 void glClearColor(GLfloat,GLfloat,GLfloat,GLfloat) {}
-void glClear(GLbitfield) {}
-void glEnable(GLenum) {}
+void glClear(GLbitfield) {if(scissored){++maskClears;clearedPixels+=scissorPixels;}}
+void glEnable(GLenum cap) {if(cap==GL_SCISSOR_TEST)scissored=true;}
 void glBlendFunc(GLenum,GLenum) {}
 }
 static void check(bool ok,const char* msg){if(!ok){std::fprintf(stderr,"FAIL: %s\n",msg);std::exit(1);}}
@@ -144,9 +159,12 @@ int main(int argc,char**){
                 holdUs.push_back(lastHoldNs*.001);
                 waitUs.push_back(lastWaitNs*.001);
                 if(rep==100) {
-                    transferBytes=0;bufferAllocs=0;render(2);
-                    std::printf("n=%d first_finished_spline payload=%llu storage_calls=%llu\n",
-                        n,(unsigned long long)transferBytes,(unsigned long long)bufferAllocs);
+                    transferBytes=0;bufferAllocs=0;draws=0;resolves=0;maskClears=errorChecks=0;clearedPixels=0;render(2);
+                    std::printf("n=%d first_finished_spline payload=%llu storage_calls=%llu retained_bytes=%zu geometry_draws=%llu resolves=%u mask_clears=%u scissor_pixels=%zu error_checks=%u\n",
+                        n,(unsigned long long)transferBytes,(unsigned long long)bufferAllocs,gpuContents.at(lastDrawBuffer).size(),
+                        (unsigned long long)draws,resolves,maskClears,clearedPixels,errorChecks);
+                    check(!bufferAllocs && transferBytes>0 && transferBytes<16000 && resolves==1 && draws==1,
+                          "completed frame adopts prefix and resolves once");
                 }
             }
             for(auto* v:{&sampleUs,&endUs,&holdUs,&waitUs}) {
@@ -219,14 +237,14 @@ int main(int argc,char**){
     render(2); // live provisional spline must be drawable
     check(Java_com_infinipaint_demo_NativeBridge_end(nullptr,nullptr,1)==JNI_TRUE,"end stroke");
     transferBytes=0;render(0);check(transferBytes>0,"finished raw uploaded once");
-    auto rawGeometry=gpuContents[lastDrawBuffer];
+    auto rawGeometry=drawnVertices();
     transferBytes=0;render(0);check(transferBytes==0,"finished raw not reuploaded");
     transferBytes=0;render(1);check(transferBytes>0,"filtered mode uploaded on demand");
-    auto filteredGeometry=gpuContents[lastDrawBuffer];
+    auto filteredGeometry=drawnVertices();
     check(rawGeometry!=filteredGeometry,"One Euro produces non-raw geometry");
     transferBytes=0;render(1);check(transferBytes==0,"filtered mode cached");
     transferBytes=0;render(2);check(transferBytes>0,"spline mode uploaded on demand");
-    auto splineGeometry=gpuContents[lastDrawBuffer];
+    auto splineGeometry=drawnVertices();
     check(splineGeometry!=filteredGeometry,"spline produces distinct tessellated geometry");
     Java_com_infinipaint_demo_NativeBridge_setCamera(nullptr,nullptr,5000,5000,1);
     draws=0;transferBytes=0;render(2);check(draws==0 && transferBytes==0,"off-screen stroke culled");
@@ -252,7 +270,7 @@ int main(int argc,char**){
     check(sample(190,12+189*0.01),"strong smoothing duplicate accepted");
     check(Java_com_infinipaint_demo_NativeBridge_end(nullptr,nullptr,1)==JNI_TRUE,"end strong smoothing");
     render(1);
-    auto strongGeometry=gpuContents[lastDrawBuffer];
+    auto strongGeometry=drawnVertices();
     check(strongGeometry!=filteredGeometry,"smoothing preset changes the output");
     // Exercise JNI screen input -> world vertex -> camera uniforms (no shader execution).
     Java_com_infinipaint_demo_NativeBridge_clear(nullptr,nullptr);
@@ -267,5 +285,34 @@ int main(int argc,char**){
     check(xy[0]==-110 && xy[1]==705,"camera converts first screen sample to world");
     check((xy[0]-uniformPanX)*uniformZoom==100 && (xy[1]-uniformPanY)*uniformZoom==250,
           "world vertex and actual projection uniforms reconstruct screen sample");
+    // A fresh context/full upload is the byte oracle for each ownership path.
+    for(int scenario=0;scenario<6;++scenario) {
+        Java_com_infinipaint_demo_NativeBridge_clear(nullptr,nullptr);
+        Java_com_infinipaint_demo_NativeBridge_setCamera(nullptr,nullptr,0,0,1);
+        auto begin=[&]{check(Java_com_infinipaint_demo_NativeBridge_begin(nullptr,nullptr,1,2),"ownership begin");};
+        auto feed=[&](int a,int b){for(int i=a;i<b;++i)check(sample(i,1+i*.01),"ownership sample");};
+        begin(); feed(0,160);
+        failUpload=scenario==3;
+        render(2);
+        if(scenario==0) feed(160,350); // no final live render, capacity miss
+        if(scenario==1 || scenario==2) {
+            if(scenario==1) Java_com_infinipaint_demo_NativeBridge_cancel(nullptr,nullptr,1);
+            else Java_com_infinipaint_demo_NativeBridge_clear(nullptr,nullptr);
+            begin(); feed(3,190); // same pointer, distinct generation; no intervening frame
+        }
+        if(scenario==4) createContext();
+        check(Java_com_infinipaint_demo_NativeBridge_end(nullptr,nullptr,1),"ownership complete");
+        if(scenario==5) {
+            Java_com_infinipaint_demo_NativeBridge_setCamera(nullptr,nullptr,5000,5000,1);
+            transferBytes=0; render(0); check(!transferBytes,"culled adoption remains lazy");
+            Java_com_infinipaint_demo_NativeBridge_setCamera(nullptr,nullptr,0,0,1);
+        }
+        bufferAllocs=0;transferBytes=0;render(2);
+        if(scenario<5)check(bufferAllocs==1,"unsafe prefix not adopted");
+        else check(bufferAllocs==0,"culled adequate prefix adopted");
+        auto actual=drawnVertices();
+        createContext();render(2);
+        check(actual==drawnVertices(),"completed bytes match clean context rebuild");
+    }
     std::printf("PASS bridge: incremental VBO, real One-Euro/spline/preset geometry differences, lazy uploads, culling, zoom, same-time, context restore, clear; incremental_bytes=%llu\n",(unsigned long long)incrementalBytes);
 }

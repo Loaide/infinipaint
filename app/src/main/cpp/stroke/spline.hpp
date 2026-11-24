@@ -5,6 +5,7 @@
 #include <vector>
 #include <cstddef>
 #include <algorithm>
+#include <span>
 namespace engine::stroke {
 // Transform from Phase 1 view-local pixels into document-local world units.
 // Caller freezes this mapping for a stroke; camera changes require explicit handling upstream.
@@ -50,6 +51,9 @@ public:
     [[nodiscard]] std::size_t max_samples() const noexcept { return params_.max_samples; }
 private:
     explicit SplineFitter(Params p) : params_(p) {}
+    friend class IncrementalSplineBuilder;
+    core::Result<double> coefficients(std::span<const core::Vec2> unique,std::span<double> h,
+                                     std::span<FittedSpline::Segment> segments) const;
     Params params_;
 };
 // Append-only live stroke staging. snapshot() builds the durable curve; tail_preview()
@@ -73,7 +77,9 @@ public:
     [[nodiscard]] float knot_pressure(std::size_t knot) const { return peak_pressure_.at(knot); }
     [[nodiscard]] float arrival_pressure(std::size_t knot) const {return points_[knot_indices_[knot]].pressure;}
     [[nodiscard]] float departure_pressure(std::size_t segment) const {return points_[knot_indices_[segment+1]-1].pressure;}
-    static constexpr int max_steps=64;
+    // 64 missed the capture target on a synthetic 2000px corner sequence.
+    // Still a hard bound on provisional emission, not view-dependent LOD.
+    static constexpr int max_steps=96;
     [[nodiscard]] int tessellation_steps(std::size_t segment,double tolerance) const {
         return (int)std::clamp(std::ceil(std::sqrt(linear_error_bound(segment)/tolerance)),
                                1.,double(max_steps));
