@@ -6,4 +6,4 @@ M01 is locally implemented and host-verified: one production navigation camera, 
 
 The owner approved all 17 acceptance checks on SM-X626B. The frame captures cover idle, camera and stylus intervals, not display presentation or physical pen latency. Documents remain in-memory, GPU coordinates remain world floats, and large-scene performance is unmeasured. M02 is next but not authorized to start.
 
-W01 is a local workflow-only checkpoint awaiting owner review; see [activation and validation](W01_WORKFLOW.md). The M01 application and its evidence are unchanged.
+W01 is owner-approved and complete. See [activation and validation](W01_WORKFLOW.md). The M01 application and evidence are unchanged.

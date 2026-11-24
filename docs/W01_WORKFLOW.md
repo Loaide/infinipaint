@@ -1,5 +1,7 @@
 # W01 — engineering workflow
 
+The owner accepted W01 at `d24b484272a485284b1068cb435fe30cc9489234`. Live model routing and actual subscription savings remain to be evaluated during normal M02 work, once separately authorized.
+
 ## Activate in OpenCode 2.4.1
 
 From the repository, use `opencode reload` (or `/reload` in the TUI), `opencode debug config` and `opencode debug agents`. If `opencode` is not on PATH, invoke the installed executable by its full path. Reload worked without restarting the service. In a fresh InfiniPaint session verify the primary agent is `infinipaint-lead` **and** use the model picker to select **GPT-6.2 Astra, Standard, Medium** if the session shows a different selection. A primary session stores its model separately; changing agents or reloading does not force an existing session to switch. Use the picker for deliberate escalation and revert afterward. No provider, credential or global configuration changed.
