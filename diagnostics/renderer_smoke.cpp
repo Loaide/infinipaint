@@ -95,7 +95,21 @@ void glUniform2f(GLint loc,GLfloat x,GLfloat y) {if(loc==1){uniformPanX=x;unifor
 void glUniform1f(GLint loc,GLfloat z) {if(loc==2)uniformZoom=z;}
 void glVertexAttribPointer(GLuint,GLint,GLenum,GLboolean,GLsizei,const void*) {}
 void glEnableVertexAttribArray(GLuint) {}
-void glDrawArrays(GLenum,GLint,GLsizei) {++draws;lastDrawBuffer=boundBuffer;}
+static unsigned resolves=0;
+void glDrawArrays(GLenum,GLint,GLsizei) {
+    if(!boundBuffer) {++resolves;return;}
+    ++draws;lastDrawBuffer=boundBuffer;
+}
+void glScissor(GLint,GLint,GLsizei,GLsizei) {}
+void glColorMask(GLboolean,GLboolean,GLboolean,GLboolean) {}
+void glDisable(GLenum) {}
+void glBlendEquation(GLenum) {}
+void glBlendFuncSeparate(GLenum,GLenum,GLenum,GLenum) {}
+void glUniform1i(GLint,GLint) {}
+const unsigned char* glGetString(GLenum id) {
+    return (const unsigned char*)(id==GL_VERSION?"OpenGL ES 2.0":"GL_EXT_blend_minmax");
+}
+void glGetIntegerv(GLenum,GLint* value){*value=8;}
 void glClearColor(GLfloat,GLfloat,GLfloat,GLfloat) {}
 void glClear(GLbitfield) {}
 void glEnable(GLenum) {}

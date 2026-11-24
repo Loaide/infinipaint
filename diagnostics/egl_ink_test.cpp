@@ -14,6 +14,7 @@
 #include <cstring>
 #include <vector>
 
+static int observedMax=-1;
 extern "C" {
 void Java_com_infinipaint_demo_NativeBridge_contextCreated(JNIEnv*, jclass);
 void Java_com_infinipaint_demo_NativeBridge_resizeViewport(JNIEnv*, jclass, jint, jint);
@@ -27,6 +28,9 @@ void Java_com_infinipaint_demo_NativeBridge_clear(JNIEnv*, jclass);
 void Java_com_infinipaint_demo_NativeBridge_render(JNIEnv*, jclass, jint);
 
 int __android_log_print(int priority, const char* tag, const char* format, ...) {
+    if(!std::strcmp(tag,"IP_COVERAGE") && std::strstr(format,"max_blend=")) {
+        va_list a; va_start(a,format); (void)va_arg(a,int); observedMax=va_arg(a,int); va_end(a);
+    }
     if (priority < ANDROID_LOG_ERROR) return 0;
     std::fprintf(stderr, "%s: ", tag);
     va_list args;
@@ -300,16 +304,44 @@ void testDwell(const Pixel& background) {
     check(render(spline)==after,"dwell changed on lift");
 }
 void measureJoinAA() {
-    auto line=[](int step) {
+    auto path=[](int step,bool ramp,bool repeat) {
+        clear(); begin(1);
+        auto send=[&](int x){sample(1,x,lineY,10,ramp?(x-20)/80.f:.5f);};
+        for(int x=20;x<=100;x+=step) send(x);
+        if(repeat) {
+            for(int x=100;x>=20;x-=step) send(x);
+            for(int x=20;x<=100;x+=step) send(x);
+        }
+        const auto live=render(raw); end(1);
+        check(live==render(raw),"union changed on lift");
+        return live;
+    };
+    auto compare=[](const Frame& a,const Frame& b) {
+        int maximum=0;
+        for(size_t i=0;i<a.size();++i) {
+            maximum=std::max(maximum,rgbDelta(a[i],b[i]));
+            check(a[i][3]==255 && b[i][3]==255,"window alpha not restored");
+        }
+        std::printf("equivalent path max RGB delta=%d/255\n",maximum);
+        check(maximum<=2,"sample density or self-overlap changed coverage");
+    };
+    for(bool ramp:{false,true}) compare(path(80,ramp,false),path(1,ramp,true));
+    // Preserve the original spline fixture, including both rounded end caps.
+    auto curve=[](int step) {
         clear(); begin(1);
         for(int x=20;x<=100;x+=step) sample(1,x,lineY,10,.5f);
         end(1); return render(spline);
     };
-    const auto sparse=line(80),dense=line(1);
-    int maximum=0;
-    for(int x=30;x<90;++x) for(int y=lineY-4;y<=lineY+4;++y)
-        maximum=std::max(maximum,rgbDelta(at(sparse,x,y),at(dense,x,y)));
-    std::printf("dense vs sparse capsule AA: max interior RGB delta=%d/255\n",maximum);
+    compare(curve(80),curve(1));
+    auto corner=[](bool repeat) {
+        clear(); begin(1);
+        for(int i=0;i<(repeat?2:1);++i) {
+            sample(1,40,12,10,.5);sample(1,62,48,10,.5);sample(1,45,15,10,.5);
+            sample(1,62,48,10,.5);sample(1,40,12,10,.5);
+        }
+        end(1); return render(raw);
+    };
+    compare(corner(false),corner(true));
 }
 } // namespace
 
@@ -324,6 +356,9 @@ int main() {
     glDisable(GL_DITHER);
 
     Java_com_infinipaint_demo_NativeBridge_contextCreated(nullptr, nullptr);
+    const auto* expected=std::getenv("IP_EXPECT_MAX");
+    std::printf("verified context coverage path: max_blend=%d\n",observedMax);
+    check(observedMax>=0 && (!expected || observedMax==std::atoi(expected)),"wrong coverage branch");
     glCheck("production contextCreated");
     Java_com_infinipaint_demo_NativeBridge_resizeViewport(nullptr, nullptr, width, height);
     Java_com_infinipaint_demo_NativeBridge_setCamera(nullptr, nullptr, 0, 0, 1);

@@ -487,6 +487,9 @@ public final class MainActivity extends Activity {
 
         gl = new GLSurfaceView(this);
         gl.setEGLContextClientVersion(2);
+        // Destination alpha is a transient per-stroke coverage mask. Every
+        // resolve restores opaque alpha before GLSurfaceView presents.
+        gl.setEGLConfigChooser(8, 8, 8, 8, 0, 0);
         gl.setPreserveEGLContextOnPause(true);
 
         gl.setRenderer(new GLSurfaceView.Renderer() {

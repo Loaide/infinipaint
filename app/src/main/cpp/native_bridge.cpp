@@ -13,6 +13,7 @@
 #include <limits>
 #include <array>
 #include <deque>
+#include <string_view>
 #include <mutex>
 #include <unordered_map>
 #include <vector>
@@ -195,6 +196,8 @@ namespace {
 
     GLint screenLoc = -1;
     GLint colorLoc = -1;
+    GLint resolveLoc=-1, bandLoc=-1;
+    bool maxCoverage=false;
 
     GLint cameraPanLoc = -1;
     GLint cameraZoomLoc = -1;
@@ -213,12 +216,14 @@ attribute vec2 aDir;
 uniform vec2 uScreen;
 uniform vec2 uCameraPan;
 uniform float uCameraZoom;
+uniform bool uResolve;
 
 varying vec2 vLocal;
 varying float vLength;
 varying vec2 vRadius;
 
 void main() {
+    if(uResolve) { gl_Position=vec4(aPos,0.0,1.0); return; }
     // Expand the segment on the GPU at the CURRENT zoom. Avoid the old
     // min-zoom world-space padding that produced gigantic overdraw when
     // zooming in on a drawing.
@@ -251,12 +256,15 @@ precision mediump float;
 #endif
 
 uniform vec4 uColor;
+uniform bool uResolve;
+uniform float uBand;
 
 varying vec2 vLocal;
 varying float vLength;
 varying vec2 vRadius;
 
 void main() {
+    if(uResolve) { gl_FragColor=uColor; return; }
 
     // Distance to the union of discs swept along a linear radius ramp.
     float dr = vRadius.y-vRadius.x;
@@ -278,10 +286,8 @@ void main() {
         d
     );
 
-    gl_FragColor = vec4(
-        uColor.rgb * a,
-        a * uColor.a
-    );
+    if(uBand>0.0 && a<uBand-0.03125) discard;
+    gl_FragColor=vec4(0.0,0.0,0.0,uBand>0.0?uBand:a);
 }
 )";
 
@@ -512,13 +518,61 @@ void main() {
                               sizeof(Vertex), (void*)offsetof(Vertex, dirX));
     }
 
-    void drawCached(GLuint vbo, GLsizei count, float r, float g, float b) {
+    struct Part { GLuint vbo; GLsizei count; };
+    // GL-thread only; a layer is either a completed mesh or stable/tail/tip.
+    std::array<Part,3> parts{};
+    size_t partCount=0;
+    void drawCached(GLuint vbo, GLsizei count, float, float, float) {
         if (!program || !vbo || count <= 0) return;
-        glUniform4f(colorLoc, r, g, b, 1.0f);
-        glBindBuffer(GL_ARRAY_BUFFER, vbo);
-        bindAttributes();
-        glDrawArrays(GL_TRIANGLES, 0, count);
+        parts.at(partCount++)={vbo,count};
+    }
+
+    template<class Gather>
+    void coverageLayer(const Bounds& box,double panX,double panY,double zoom,
+                       float r,float g,float b,Gather gather) {
+        // Match float camera uniforms; clip in double before integer conversion.
+        auto edge=[](double p,int limit){return (int)std::clamp(p,0.,double(limit));};
+        int x=edge(std::floor((box.minX-(double)(float)panX)*(float)zoom)-1,width);
+        int y=edge(std::floor((box.minY-(double)(float)panY)*(float)zoom)-1,height);
+        int right=edge(std::ceil((box.maxX-(double)(float)panX)*(float)zoom)+1,width);
+        int bottom=edge(std::ceil((box.maxY-(double)(float)panY)*(float)zoom)+1,height);
+        if(right<=x || bottom<=y) return;
+        partCount=0;
+        gather(); // lazy upload once, even on the extension-free path
+        if(!partCount) return;
+        glEnable(GL_SCISSOR_TEST);
+        glScissor(x,height-bottom,right-x,bottom-y);
+        glColorMask(GL_FALSE,GL_FALSE,GL_FALSE,GL_TRUE);
+        glClearColor(0,0,0,0);
+        glClear(GL_COLOR_BUFFER_BIT);
+        constexpr GLenum maxExt=0x8008;
+        if(maxCoverage) glBlendEquation(maxExt);
+        else glDisable(GL_BLEND);
+        // Core ES2 fallback: ascending opaque threshold bands. Each band
+        // overwrites alpha only where covered, so alpha=round(16*max(a))/16.
+        int passes=maxCoverage?1:16;
+        for(int k=1;k<=passes;++k) {
+            glUniform1f(bandLoc,maxCoverage?0.f:k/16.f);
+            for(size_t i=0;i<partCount;++i) {
+                glBindBuffer(GL_ARRAY_BUFFER,parts[i].vbo);
+                bindAttributes();
+                glDrawArrays(GL_TRIANGLES,0,parts[i].count);
+                ++frameDrawCalls;
+            }
+        }
+        glEnable(GL_BLEND);
+        glBlendEquation(GL_FUNC_ADD);
+        glColorMask(GL_TRUE,GL_TRUE,GL_TRUE,GL_TRUE);
+        glBlendFuncSeparate(GL_DST_ALPHA,GL_ONE_MINUS_DST_ALPHA,GL_ONE,GL_ZERO);
+        glUniform1i(resolveLoc,1);
+        glUniform4f(colorLoc,r,g,b,1.f);
+        static constexpr GLfloat triangle[]={-1,-1,3,-1,-1,3};
+        glBindBuffer(GL_ARRAY_BUFFER,0);
+        glVertexAttribPointer(positionLoc,2,GL_FLOAT,GL_FALSE,0,triangle);
+        glDrawArrays(GL_TRIANGLES,0,3); // scissored resolve, NOT a viewport pass
         ++frameDrawCalls;
+        glUniform1i(resolveLoc,0);
+        glDisable(GL_SCISSOR_TEST);
     }
 
     void draw(const Mesh& mesh, float r, float g, float b) {
@@ -612,6 +666,7 @@ void main() {
     }
 
     struct ViewTrace {
+        Bounds bounds;
         LiveUpload raw, clean, stable, tail;
         float lastX = 0.0f, lastY = 0.0f;
         float filteredX = 0.0f, filteredY = 0.0f;
@@ -1064,6 +1119,24 @@ Java_com_infinipaint_demo_NativeBridge_contextCreated(JNIEnv*, jclass) {
 
     colorLoc =
             glGetUniformLocation(program, "uColor");
+    resolveLoc=glGetUniformLocation(program,"uResolve");
+    bandLoc=glGetUniformLocation(program,"uBand");
+    GLint alphaBits=0; glGetIntegerv(GL_ALPHA_BITS,&alphaBits);
+    if(alphaBits<8) {
+        __android_log_print(ANDROID_LOG_ERROR,"IP_COVERAGE","RGBA8 window required; alpha bits=%d",alphaBits);
+        glDeleteProgram(program); program=0; return;
+    }
+    const auto* ext=(const char*)glGetString(GL_EXTENSIONS);
+    std::string_view names=ext?ext:"";
+    while(!names.empty()) {
+        auto split=names.find(' ');
+        if(names.substr(0,split)=="GL_EXT_blend_minmax") break;
+        names=split==names.npos?std::string_view{}:names.substr(split+1);
+    }
+    const char* version=(const char*)glGetString(GL_VERSION);
+    maxCoverage=!names.empty() || (version && std::string_view(version).starts_with("OpenGL ES 3."));
+    __android_log_print(ANDROID_LOG_INFO,"IP_COVERAGE","alpha bits=%d max_blend=%d",alphaBits,maxCoverage);
+    glDisable(GL_DITHER);
 
     cameraPanLoc =
             glGetUniformLocation(program, "uCameraPan");
@@ -1170,6 +1243,7 @@ Java_com_infinipaint_demo_NativeBridge_render(
             auto& trace = *pair.second;
 
             ViewTrace view;
+            view.bounds=trace.bounds;
             view.radiusWorld = trace.rawPeak;
             view.filteredRadius = trace.cleanPeak;
             if (mode == 0 || mode == 3)
@@ -1197,6 +1271,12 @@ Java_com_infinipaint_demo_NativeBridge_render(
                         trace.rawPoints.back();
 
                 view.hasLast = true;
+                float pad=std::max(trace.rawPeak,trace.cleanPeak)+1.f/(float)MIN_ZOOM;
+                auto& q=view.bounds;
+                q.minX=std::min(q.minX,std::min(view.lastX,view.filteredX)-pad);
+                q.maxX=std::max(q.maxX,std::max(view.lastX,view.filteredX)+pad);
+                q.minY=std::min(q.minY,std::min(view.lastY,view.filteredY)-pad);
+                q.maxY=std::max(q.maxY,std::max(view.lastY,view.filteredY)+pad);
             }
 
             active.emplace_back(trace.gpuId, std::move(view));
@@ -1257,7 +1337,8 @@ Java_com_infinipaint_demo_NativeBridge_render(
             cached.maxY < viewMinY || cached.minY > viewMaxY) continue;
         ++visibleCompleted;
         auto drawPart = [&](int part, float r, float g, float b) {
-            drawFinishedPart(cached, part, r, g, b);
+            coverageLayer({cached.minX,cached.minY,cached.maxX,cached.maxY},framePanX,framePanY,frameZoom,r,g,b,
+                [&]{drawFinishedPart(cached,part,r,g,b);});
         };
         if (mode == 0) drawPart(0, 0.20f, 0.95f, 0.78f);
         else if (mode == 1) drawPart(1, 1.0f, 0.76f, 0.20f);
@@ -1296,17 +1377,23 @@ Java_com_infinipaint_demo_NativeBridge_render(
             draw(dot,r,g,b);
         };
         if(mode==2 || mode==3) {
+            coverageLayer(trace.bounds,framePanX,framePanY,frameZoom,.28f,.58f,1.f,[&]{
             drawLive(strokeId,2,trace.stable,.28f,.58f,1.f);
             drawLive(strokeId,3,trace.tail,.28f,.58f,1.f);
             tip(true,.28f,.58f,1.f);
+            });
         }
         if(mode==1 || mode==3) {
+            coverageLayer(trace.bounds,framePanX,framePanY,frameZoom,1.f,.76f,.20f,[&]{
             drawLive(strokeId,1,trace.clean,1.f,.76f,.20f);
             tip(true,1.f,.76f,.20f);
+            });
         }
         if(mode==0 || mode==3) {
+            coverageLayer(trace.bounds,framePanX,framePanY,frameZoom,.20f,.95f,.78f,[&]{
             drawLive(strokeId,0,trace.raw,.20f,.95f,.78f);
             tip(false,.20f,.95f,.78f);
+            });
         }
     }
     const double renderCpuMs = (profileNs() - frameStartNs) / 1e6;
