@@ -286,6 +286,31 @@ void testCompletedOrder(const Pixel& background) {
     check(rgbDelta(thickLast, thickRaw) <= 3 && int(thinLast[0]) - int(thickRaw[0]) >= 12,
           "overlapping completed strokes did not composite in completion order");
 }
+
+void testDwell(const Pixel& background) {
+    clear(); begin(1);
+    sample(1,20,lineY,10,0); sample(1,100,lineY,10,0);
+    const auto before=render(spline);
+    sample(1,100,lineY,10,1);
+    const auto after=render(spline);
+    for(int x=20;x<95;++x) for(int y=lineY-4;y<=lineY+4;++y)
+        check(at(before,x,y)==at(after,x,y),"stationary pressure repainted earlier ink");
+    check(rgbDelta(at(after,100,lineY+2),background)>100,"stationary deposit missing");
+    end(1);
+    check(render(spline)==after,"dwell changed on lift");
+}
+void measureJoinAA() {
+    auto line=[](int step) {
+        clear(); begin(1);
+        for(int x=20;x<=100;x+=step) sample(1,x,lineY,10,.5f);
+        end(1); return render(spline);
+    };
+    const auto sparse=line(80),dense=line(1);
+    int maximum=0;
+    for(int x=30;x<90;++x) for(int y=lineY-4;y<=lineY+4;++y)
+        maximum=std::max(maximum,rgbDelta(at(sparse,x,y),at(dense,x,y)));
+    std::printf("dense vs sparse capsule AA: max interior RGB delta=%d/255\n",maximum);
+}
 } // namespace
 
 int main() {
@@ -320,6 +345,8 @@ int main() {
         testTaper(mode, background);
     }
     testCompletedOrder(background);
+    testDwell(background);
+    measureJoinAA();
     clear();
     check(render(composite) == blank, "JNI clear left ink in the framebuffer");
     std::puts("PASS: production GLES2 shader, pressure dots/taper, pen-up, and completed order");

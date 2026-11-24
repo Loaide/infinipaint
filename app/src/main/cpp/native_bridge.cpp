@@ -12,6 +12,7 @@
 #include <memory>
 #include <limits>
 #include <array>
+#include <deque>
 #include <mutex>
 #include <unordered_map>
 #include <vector>
@@ -35,6 +36,27 @@ namespace {
     };
 
     using Mesh = std::vector<Vertex>;
+    constexpr double MIN_ZOOM = 0.1;
+    struct Bounds {
+        float minX=std::numeric_limits<float>::infinity(),minY=minX,maxX=-minX,maxY=-minX;
+        void include(const Mesh& mesh,size_t from) {
+            // Six identical segment descriptors per quad; inspect only newly
+            // emitted quads. Obsolete tail bounds are safe false positives.
+            for(size_t i=from;i<mesh.size();i+=6) {
+                const auto& v=mesh[i];
+                const float x=v.x+v.dirX*v.len,y=v.y+v.dirY*v.len;
+                const float pad=std::max(v.radius,v.endRadius)+1.f/(float)MIN_ZOOM;
+                minX=std::min(minX,std::min(v.x,x)-pad); minY=std::min(minY,std::min(v.y,y)-pad);
+                maxX=std::max(maxX,std::max(v.x,x)+pad); maxY=std::max(maxY,std::max(v.y,y)+pad);
+            }
+        }
+    };
+    struct CompletedInk {
+        input::RawInputStroke raw;
+        input::OneEuroParams filter;
+        float radiusWorld=0;
+        std::array<Mesh,3> derived;
+    };
 
     struct Trace {
         uint64_t gpuId = 0;
@@ -45,6 +67,8 @@ namespace {
         Mesh cleanMesh;
         Mesh stableMesh;
         Mesh tailMesh;
+        Bounds bounds;
+        std::shared_ptr<CompletedInk> completion=std::make_shared<CompletedInk>();
         uint64_t tailRevision = 0;
 
         std::vector<float> rawPoints;
@@ -116,7 +140,7 @@ namespace {
         std::shared_ptr<const Mesh> spline;
         float minX = 0, minY = 0, maxX = 0, maxY = 0;
     };
-    std::vector<FinishedTrace> finished;
+    std::deque<FinishedTrace> finished;
     // Stable IDs are assigned under stateMutex; GPU resources live only on GL thread.
     uint64_t finishedEpoch = 1;
     struct CachedGpuStroke {
@@ -151,7 +175,6 @@ namespace {
     double cameraPanY = 0.0;
     double cameraZoom = 1.0;
 
-    constexpr double MIN_ZOOM = 0.1;
     constexpr double MAX_ZOOM = 16.0;
 
 // --------------------------------------------------
@@ -221,7 +244,11 @@ void main() {
 // --------------------------------------------------
 
     const char* fs = R"(
+#ifdef GL_FRAGMENT_PRECISION_HIGH
+precision highp float;
+#else
 precision mediump float;
+#endif
 
 uniform vec4 uColor;
 
@@ -672,20 +699,16 @@ Java_com_infinipaint_demo_NativeBridge_begin(
         return JNI_FALSE;
     }
 
-    auto trace = std::make_unique<Trace>(
-            std::move(inputProcessor.value()),
-            std::move(fitter.value())
-    );
-
-    trace->strokeRadiusWorld = (float)(1.9 / cameraZoom);
-    if (!trace->input.begin_stroke()) {
-        return JNI_FALSE;
-    }
-
-    trace->gpuId = nextLiveGpuId++;
-    live[id] = std::move(trace);
-
-    return JNI_TRUE;
+    try {
+        auto trace=std::make_unique<Trace>(std::move(inputProcessor.value()),std::move(fitter.value()));
+        trace->strokeRadiusWorld = (float)(1.9 / cameraZoom);
+        trace->completion->filter=params;
+        trace->completion->radiusWorld=trace->strokeRadiusWorld;
+        if (!trace->input.begin_stroke()) return JNI_FALSE;
+        trace->gpuId = nextLiveGpuId++;
+        live[id] = std::move(trace);
+        return JNI_TRUE;
+    } catch(const std::bad_alloc&) { return JNI_FALSE; }
 }
 
 // --------------------------------------------------
@@ -707,7 +730,7 @@ Java_com_infinipaint_demo_NativeBridge_sample(
 
     const int64_t processingStartNs = profileNs();
     std::lock_guard<std::mutex> guard(stateMutex);
-    auditMutexWaitNs.fetch_add(profileNs() - processingStartNs, std::memory_order_relaxed);
+    const auto waitNs=profileNs()-processingStartNs;
 
     auto it = live.find(id);
 
@@ -728,13 +751,14 @@ Java_com_infinipaint_demo_NativeBridge_sample(
 
     if (
             !std::isfinite(worldX) ||
-            !std::isfinite(worldY)
+            !std::isfinite(worldY) ||
+            std::max(std::abs(worldX),std::abs(worldY))>std::numeric_limits<float>::max()/1024.
             ) {
         return JNI_FALSE;
     }
 
     // Original event times can tie; arrival order resolves the tie.
-    if (!std::isfinite(time)) {
+    if (!std::isfinite(time) || time>=double(INT64_MAX)/1e9) {
         __android_log_print(ANDROID_LOG_ERROR, "IP90_INPUT", "Native sample: non-finite timestamp");
         return JNI_FALSE;
     }
@@ -762,10 +786,12 @@ Java_com_infinipaint_demo_NativeBridge_sample(
         return JNI_FALSE;
     }
     trace.lastAcceptedTime = time;
+    auditMutexWaitNs.fetch_add(waitNs,std::memory_order_relaxed);
     auditFilterNs.fetch_add(commitNs,std::memory_order_relaxed);
 
     // Immediate ink uses actual input positions.
 
+    const auto rawStart=trace.rawMesh.size(),cleanStart=trace.cleanMesh.size(),stableStart=trace.stableMesh.size();
     addPoint(
             trace.rawPoints,
             trace.rawMesh,
@@ -796,8 +822,13 @@ Java_com_infinipaint_demo_NativeBridge_sample(
     const int64_t splineStartNs = profileNs();
     // Tessellate newly stable segments only, when the stable count advances.
     trace.lastRadius=brushRadius(trace,pressure);
-    if(trace.spline.segment_count()!=oldSegments)
+    if(trace.spline.segment_count()!=oldSegments) {
         buildStable(trace);
+        trace.bounds.include(trace.tailMesh,0);
+    }
+    trace.bounds.include(trace.stableMesh,stableStart);
+    trace.bounds.include(trace.rawMesh,rawStart);
+    trace.bounds.include(trace.cleanMesh,cleanStart);
     auditSplineNs.fetch_add(profileNs() - splineStartNs, std::memory_order_relaxed);
     auditStageSamples.fetch_add(1, std::memory_order_relaxed);
 
@@ -824,7 +855,9 @@ Java_com_infinipaint_demo_NativeBridge_end(
         jint id
 ) {
 
-    std::lock_guard<std::mutex> guard(stateMutex);
+    const auto enter=profileNs();
+    std::unique_lock<std::mutex> guard(stateMutex);
+    const auto lockStart=profileNs();
 
     auto it = live.find(id);
 
@@ -833,18 +866,15 @@ Java_com_infinipaint_demo_NativeBridge_end(
     }
 
     auto& trace = *it->second;
+    if(trace.input.raw_samples().empty()) return JNI_FALSE;
+    // Allocate the ordered slot before touching live meshes. No render can
+    // observe it until populated. Sample preflight reserved terminal geometry.
+    try { finished.emplace_back(); }
+    catch(const std::bad_alloc&) { return JNI_FALSE; }
 
-    if (trace.deviationCount) {
-        __android_log_print(ANDROID_LOG_INFO, "IP90_FIDELITY",
-                            "samples=%zu mean_deviation_px=%.3f max_deviation_px=%.3f raw_filter_mean_px=%.3f raw_filter_max_px=%.3f would_exceed_2px=%zu (%.1f%%) zoom=%.3f",
-                            trace.deviationCount, trace.deviationSum / trace.deviationCount,
-                            trace.deviationMax, trace.filteredBeforeLimitSum / trace.deviationCount,
-                            trace.originalDeviationMax, trace.wouldExceedLimit,
-                            100.0 * trace.wouldExceedLimit / trace.deviationCount,
-                            1.9 / trace.strokeRadiusWorld);
-    }
     auto& splineMesh=trace.stableMesh;
     splineMesh.insert(splineMesh.end(),trace.tailMesh.begin(),trace.tailMesh.end());
+    const auto rawStart=trace.rawMesh.size(),cleanStart=trace.cleanMesh.size(),splineStart=splineMesh.size();
     // Preserve the physical final pen position even if Android supplied
     // multiple different positions with the same timestamp.
     if (trace.rawPoints.size() >= 2 && trace.cleanPoints.size() >= 2) {
@@ -861,39 +891,29 @@ Java_com_infinipaint_demo_NativeBridge_end(
     }
     const size_t rawSamples = trace.rawPoints.size() / 2;
     const size_t cleanSamples = trace.cleanPoints.size() / 2;
+    trace.bounds.include(trace.rawMesh,rawStart);
+    trace.bounds.include(trace.cleanMesh,cleanStart);
+    trace.bounds.include(splineMesh,splineStart);
+    auto ink=std::move(trace.completion);
+    ink->raw=std::move(trace.input).release_raw();
+    ink->derived={std::move(trace.rawMesh),std::move(trace.cleanMesh),std::move(splineMesh)};
+    const auto& b=trace.bounds;
+    finished.back()={{ink,&ink->raw},{ink,&ink->derived[0]},{ink,&ink->derived[1]},
+                     {ink,&ink->derived[2]},b.minX,b.minY,b.maxX,b.maxY};
+    auto retired=std::move(it->second); // release mutable histories outside lock
+    live.erase(it);
+    const auto held=profileNs()-lockStart;
+    guard.unlock();
     __android_log_print(ANDROID_LOG_INFO, "IP_GEOMETRY",
         "raw_samples=%zu filtered_samples=%zu raw_vertices=%zu filtered_vertices=%zu spline_vertices=%zu mean_filter_deviation_px=%.4f max_filter_deviation_px=%.4f",
-        rawSamples, cleanSamples, trace.rawMesh.size(), trace.cleanMesh.size(),
-        splineMesh.size(), trace.deviationCount ? trace.deviationSum / trace.deviationCount : 0.0,
-        trace.deviationMax);
-    // World bounds include expanded quad coverage for safe camera culling.
-    float minX = std::numeric_limits<float>::infinity();
-    float minY = std::numeric_limits<float>::infinity();
-    float maxX = -minX, maxY = -minY;
-    for (const Mesh* mesh : {&trace.rawMesh, &trace.cleanMesh, &splineMesh}) {
-        for (const Vertex& v : *mesh) {
-            const float bx = v.x + v.dirX * v.len;
-            const float by = v.y + v.dirY * v.len;
-            const float pad = std::max(v.radius,v.endRadius) + 1.0f / (float)MIN_ZOOM;
-            minX = std::min(minX, std::min(v.x, bx) - pad);
-            minY = std::min(minY, std::min(v.y, by) - pad);
-            maxX = std::max(maxX, std::max(v.x, bx) + pad);
-            maxY = std::max(maxY, std::max(v.y, by) + pad);
-        }
-    }
-    finished.push_back({
-        std::make_shared<const input::RawInputStroke>(trace.input.raw_samples()),
-        std::make_shared<const Mesh>(std::move(trace.rawMesh)),
-        std::make_shared<const Mesh>(std::move(trace.cleanMesh)),
-        std::make_shared<const Mesh>(std::move(splineMesh)),
-        minX, minY, maxX, maxY
-    });
-
-    auto ended = trace.input.end_stroke();
-    (void)ended;
-
-    live.erase(it);
-
+        rawSamples, cleanSamples, ink->derived[0].size(), ink->derived[1].size(),
+        ink->derived[2].size(), trace.deviationSum/trace.deviationCount,trace.deviationMax);
+    __android_log_print(ANDROID_LOG_INFO,"IP90_FIDELITY",
+        "samples=%zu mean_deviation_px=%.3f max_deviation_px=%.3f would_exceed_2px=%zu zoom=%.3f",
+        trace.deviationCount,trace.deviationSum/trace.deviationCount,trace.deviationMax,
+        trace.wouldExceedLimit,1.9/trace.strokeRadiusWorld);
+    __android_log_print(ANDROID_LOG_INFO,"IP_PEN_UP","samples=%zu lock_ns=%lld wait_ns=%lld",
+                        rawSamples,(long long)held,(long long)(lockStart-enter));
     return JNI_TRUE;
 }
 
@@ -1227,9 +1247,10 @@ Java_com_infinipaint_demo_NativeBridge_render(
         glFinishedCount = newCompleted.size();
     }
     for (const FinishedTrace& trace : newCompleted) cacheFinished(trace);
-    const double viewMinX = framePanX, viewMinY = framePanY;
-    const double viewMaxX = framePanX + width/frameZoom;
-    const double viewMaxY = framePanY + height/frameZoom;
+    // Cull in the same quantized viewport used by the existing float shader.
+    const double viewMinX = (float)framePanX, viewMinY = (float)framePanY;
+    const double viewMaxX = viewMinX + width/(double)(float)frameZoom;
+    const double viewMaxY = viewMinY + height/(double)(float)frameZoom;
     uint64_t visibleCompleted = 0;
     for (auto& cached : gpuFinished) {
         if (cached.maxX < viewMinX || cached.minX > viewMaxX ||

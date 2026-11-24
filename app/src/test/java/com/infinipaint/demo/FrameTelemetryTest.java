@@ -50,4 +50,13 @@ public class FrameTelemetryTest {
         assertNull(frames.snapshot(true).baseline);
         assertEquals(2, frames.snapshot(false).baseline.callbacks);
     }
+
+    @Test public void recentWindowRollsAndResetsWithoutDroppingLifetimeCounts() {
+        for (int i=1;i<=513;i++) { frames.rendered(i); frames.callbackFinished(i+2); }
+        FrameTelemetry.Snapshot s=frames.snapshot(false);
+        assertArrayEquals(new long[]{512,257,488,508,513},s.nativeWindow);
+        assertEquals(515,s.callbackWindow[4]);
+        assertEquals(0,frames.snapshot(true).nativeWindow[0]);
+        assertEquals(513,frames.snapshot(false).renders);
+    }
 }

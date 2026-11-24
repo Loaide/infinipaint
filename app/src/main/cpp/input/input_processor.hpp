@@ -13,6 +13,9 @@ public:
     [[nodiscard]] core::Result<CleanInputPoint> process(const RawInputPoint&, void*, BeforeCommit);
     [[nodiscard]] core::Result<CleanInputStroke> process_batch(const RawInputStroke& raw);
     [[nodiscard]] core::Result<CleanInputStroke> end_stroke();
+    // For a retiring processor only. Moves the authoritative history without
+    // iterating it. Remaining scratch storage dies with the live trace.
+    [[nodiscard]] RawInputStroke release_raw() && noexcept { return std::move(raw_); }
     void cancel_stroke() noexcept;
     [[nodiscard]] bool active() const noexcept { return active_; }
     [[nodiscard]] const RawInputStroke& raw_samples() const noexcept { return raw_; }

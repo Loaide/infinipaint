@@ -90,6 +90,9 @@ public final class MainActivity extends Activity {
                         + "native_render samples=%d sum_ns=%d max_ns=%d%n",
                 prefix, s.matched, s.waitSumNs, s.waitMaxNs, s.renders, s.nativeSumNs, s.nativeMaxNs);
         FrameTelemetry.Snapshot b = s.baseline;
+        out.println(prefix+"recent_ns [count,p50,p95,p99,max] wait="+java.util.Arrays.toString(s.waitWindow)
+                +" native="+java.util.Arrays.toString(s.nativeWindow)
+                +" callback="+java.util.Arrays.toString(s.callbackWindow));
         if (b != null) {
             out.printf(Locale.US, "%ssince_mark elapsed_ms=%d camera=%d stylus=%d other=%d "
                             + "callbacks=%d withoutPending=%d%n",
@@ -510,6 +513,7 @@ public final class MainActivity extends Activity {
             public void onDrawFrame(
                     javax.microedition.khronos.opengles.GL10 unused) {
 
+                long entryNs = System.nanoTime();
                 frames.drawStarted();
                 long startNs = System.nanoTime();
                 NativeBridge.render(mode);
@@ -528,6 +532,7 @@ public final class MainActivity extends Activity {
                     fpsStart = endNs;
                     runOnUiThread(() -> { if (running) updateStatus(); });
                 }
+                frames.callbackFinished(System.nanoTime()-entryNs);
             }
         });
 

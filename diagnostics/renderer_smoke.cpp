@@ -12,6 +12,17 @@
 #include <map>
 #include <vector>
 #include <cstring>
+#include <new>
+
+// Single-threaded fault injection. Trigger exactly one scalar allocation.
+static int failAfter=-1;
+void* operator new(size_t n) {
+    if(failAfter>=0 && failAfter--==0) throw std::bad_alloc{};
+    if(auto* p=std::malloc(n?n:1)) return p;
+    throw std::bad_alloc{};
+}
+[[gnu::noinline]] void operator delete(void* p) noexcept {std::free(p);}
+[[gnu::noinline]] void operator delete(void* p,size_t) noexcept {std::free(p);}
 
 extern "C" {
 void Java_com_infinipaint_demo_NativeBridge_contextCreated(JNIEnv*,jclass);
@@ -32,8 +43,16 @@ static unsigned deletedObjects = 0;
 static GLsizei viewportWidth = 0, viewportHeight = 0;
 static GLfloat uniformPanX, uniformPanY, uniformZoom;
 static std::map<unsigned,std::vector<uint8_t>> gpuContents;
+static long long lastHoldNs;
+static long long lastWaitNs;
 extern "C" {
-int __android_log_print(int,const char*,const char*,...) { return 0; }
+int __android_log_print(int,const char* tag,const char* fmt,...) {
+    if(!std::strcmp(tag,"IP_PEN_UP")) {
+        va_list a; va_start(a,fmt); (void)va_arg(a,size_t); lastHoldNs=va_arg(a,long long);
+        lastWaitNs=va_arg(a,long long); va_end(a);
+    }
+    return 0;
+}
 GLuint glCreateShader(GLenum) {return nextId++;}
 void glShaderSource(GLuint,GLsizei,const GLchar*const*,const GLint*) {}
 void glCompileShader(GLuint) {}
@@ -92,8 +111,10 @@ int main(int argc,char**){
     auto resize=[](int w,int h){Java_com_infinipaint_demo_NativeBridge_resizeViewport(nullptr,nullptr,w,h);};
     if(argc>1) {
         using clock=std::chrono::steady_clock;
+        Java_com_infinipaint_demo_NativeBridge_contextCreated(nullptr,nullptr);
+        resize(1200,800);
         for(int n:{256,4096}) {
-            std::vector<double> endUs, sampleUs;
+            std::vector<double> endUs, sampleUs, holdUs,waitUs;
             for(int rep=0;rep<101;++rep) {
                 Java_com_infinipaint_demo_NativeBridge_clear(nullptr,nullptr);
                 check(Java_com_infinipaint_demo_NativeBridge_begin(nullptr,nullptr,1,2),"bench begin");
@@ -102,14 +123,22 @@ int main(int argc,char**){
                     check(sample(i,12+i*.01),"bench sample");
                     sampleUs.push_back(std::chrono::duration<double,std::micro>(clock::now()-start).count());
                 }
+                if(rep==100) render(2); // live buffers exist at publication
                 auto start=clock::now();
                 check(Java_com_infinipaint_demo_NativeBridge_end(nullptr,nullptr,1),"bench end");
                 endUs.push_back(std::chrono::duration<double,std::micro>(clock::now()-start).count());
+                holdUs.push_back(lastHoldNs*.001);
+                waitUs.push_back(lastWaitNs*.001);
+                if(rep==100) {
+                    transferBytes=0;bufferAllocs=0;render(2);
+                    std::printf("n=%d first_finished_spline payload=%llu storage_calls=%llu\n",
+                        n,(unsigned long long)transferBytes,(unsigned long long)bufferAllocs);
+                }
             }
-            for(auto* v:{&sampleUs,&endUs}) {
+            for(auto* v:{&sampleUs,&endUs,&holdUs,&waitUs}) {
                 std::sort(v->begin(),v->end());
                 std::printf("n=%d %s_us p50/p95/p99/max %.3f %.3f %.3f %.3f\n",n,
-                    v==&endUs?"end":"sample",(*v)[v->size()/2],(*v)[v->size()*95/100],
+                    v==&endUs?"end":v==&holdUs?"hold":v==&waitUs?"wait":"sample",(*v)[v->size()/2],(*v)[v->size()*95/100],
                     (*v)[v->size()*99/100],v->back());
             }
         }
@@ -123,6 +152,40 @@ int main(int argc,char**){
         resize(1200,800);
     };
     createContext();
+    for(int i=0;i<3;++i) {
+        failAfter=i;
+        check(!Java_com_infinipaint_demo_NativeBridge_begin(nullptr,nullptr,1,2),"begin allocation failure");
+        failAfter=-1;
+    }
+    bool retried=false;
+    for(int i=0;i<128 && !retried;++i) {
+        check(Java_com_infinipaint_demo_NativeBridge_begin(nullptr,nullptr,1,2),"fault fixture begin");
+        check(sample(0,1),"fault fixture sample");
+        failAfter=0;
+        auto ended=Java_com_infinipaint_demo_NativeBridge_end(nullptr,nullptr,1);
+        failAfter=-1;
+        if(!ended) {
+            check(sample(1,2) && Java_com_infinipaint_demo_NativeBridge_end(nullptr,nullptr,1),
+                  "failed completion slot leaves trace retryable");
+            retried=true;
+        }
+    }
+    check(retried,"exercised completion allocation failure");
+    Java_com_infinipaint_demo_NativeBridge_clear(nullptr,nullptr);
+    int injected=0;
+    for(int i=0;i<28;++i) {
+        check(Java_com_infinipaint_demo_NativeBridge_begin(nullptr,nullptr,1,2) && sample(0,1),"transaction setup");
+        failAfter=i;
+        const bool ok=sample(1,2);
+        failAfter=-1;
+        if(!ok) {
+            check(sample(1,1.5),"failed sample rolled back time and filter");
+            ++injected;
+        }
+        check(Java_com_infinipaint_demo_NativeBridge_end(nullptr,nullptr,1),"transaction finish");
+        Java_com_infinipaint_demo_NativeBridge_clear(nullptr,nullptr);
+    }
+    check(injected>=8,"exercised input, spline and mesh allocation failures");
     Java_com_infinipaint_demo_NativeBridge_setCamera(nullptr,nullptr,0,0,1);
     Java_com_infinipaint_demo_NativeBridge_setSmoothingPreset(nullptr,nullptr,1);
     check(Java_com_infinipaint_demo_NativeBridge_begin(nullptr,nullptr,1,2)==JNI_TRUE,"begin stroke");

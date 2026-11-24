@@ -14,10 +14,11 @@ void* operator new(size_t n) {
 void operator delete(void* p) noexcept { std::free(p); }
 void operator delete(void* p, size_t) noexcept { std::free(p); }
 
-int main() {
+int main(int argc,char**) {
     using namespace engine::stroke;
     using clock = std::chrono::steady_clock;
-    for (bool stationary : {false, true}) for (size_t n : {1024,4096,16384}) {
+    for (bool stationary : {false, true}) for (size_t n : {1024,4096,16384,131072}) {
+        if(n==131072 && argc==1) continue;
         IncrementalSplineBuilder b(SplineFitter::create().value());
         std::vector<double> us(n);
         calls = bytes = 0;
@@ -28,6 +29,7 @@ int main() {
             us[i]=std::chrono::duration<double,std::micro>(clock::now()-start).count();
         }
         std::sort(us.begin(),us.end());
+        if(argc>1 && (bytes>2048*n || (stationary && calls>32))) return 2;
         std::printf("%s n=%zu allocations=%zu requested_bytes=%zu append_us p50/p95/p99/max %.3f %.3f %.3f %.3f\n",
             stationary?"dot":"line",n,calls,bytes,us[n/2],us[n*95/100],us[n*99/100],us.back());
     }

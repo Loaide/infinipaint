@@ -17,7 +17,7 @@ build -I"$t" -Idiagnostics/test_support diagnostics/renderer_smoke.cpp "$c/nativ
 "$t/smoke"
 "$t/smoke" bench
 c++ -std=c++20 -O2 -I"$c" diagnostics/spline_scaling.cpp "$c/stroke/spline.cpp" -o "$t/scaling"
-"$t/scaling"
+"$t/scaling" --check
 mkdir "$t/android"
 cp diagnostics/test_support/android/log.h "$t/android/"
 cp -R "$NDK_HEADERS/EGL" "$NDK_HEADERS/GLES2" "$NDK_HEADERS/KHR" "$t/"
