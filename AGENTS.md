@@ -1,19 +1,19 @@
 # InfiniPaint agent contract
 
-On session start, read the engineering contract and `docs/SESSION_HANDOFF.md`. Compare the expected branch and full SHA with `git branch --show-current` and `git rev-parse HEAD`; inspect staged, unstaged and untracked paths with `git status -sb -uall`. For a later HEAD, verify `git merge-base --is-ancestor <anchor> HEAD` and inspect `git diff --name-status <anchor> HEAD`. Carry application test evidence forward unchanged only for documentation-only descendants. Stop on wrong branch, divergence or unexplained changes; do not auto-switch or clean. If the handoff is missing or contradictory, reconstruct from Git, state and latest report before acting; ask if authorization is unclear.
+On startup, read `docs/SESSION_HANDOFF.md` once. Verify branch, full HEAD and staged, unstaged and untracked paths (`scripts/engineering.ps1 -Mode State`). For a later HEAD, verify `git merge-base --is-ancestor <anchor> HEAD` and inspect `git diff --name-status <anchor> HEAD`. Carry application evidence forward only after verifying no changes to its inputs, build, tests or harnesses. Stop on wrong branch, divergence or unexplained changes; do not auto-switch or clean. If the handoff is missing or contradictory, reconstruct from Git, state and latest report; ask if authorization is unclear.
 
 Use the handoff as an index: open relevant state, ADRs, evidence and affected code only. Before code edits, check `docs/CURRENT_STATE.md` and the applicable decisions in `docs/DECISIONS.md`.
 
 Source of truth: verified repository HEAD plus approved ADRs. Historical ZIPs are reference artifacts, not proof of implementation. Record branch, full SHA and inspected files in every substantial report. Never claim tests ran without output evidence.
 
 ## Workflow
-1. Audit the current source and dependencies; reconcile prototype and documentation.
+1. Inspect affected source and dependencies; do not repeat accepted architecture audits. Use `docs/CODE_MAP.md` if needed.
 2. Define task acceptance criteria, baseline and affected modules.
 3. Implement a coherent vertical slice on a task branch.
-4. Run targeted tests, regression suite and device tests when applicable.
-5. Invoke independent reviewer; fix findings or document blockers.
-6. At milestone completion or a material change of gate, refresh `docs/SESSION_HANDOFF.md` and reconcile state/report before stopping. Follow the handoff checklist in `docs/ENGINEERING_CONTRACT.md`.
-7. Stop at milestone gate; request owner approval. Do not merge/push without approval.
+4. Run focused checks while editing; run comprehensive regression, applicable device tests and benchmark comparisons at meaningful checkpoints. Maintain applicable visual goldens, adversarial geometry, deterministic replay, lifecycle and recovery coverage. Commit coherent verified slices locally.
+5. Get independent specialist review for significant or high-risk changes; fix findings or document blockers.
+6. At milestone completion or gate change, update `docs/SESSION_HANDOFF.md` with milestone/gate, branch/full tested SHA, inspected checkpoint if different, evidence links and limits, risks, applicable ADRs and exact next action. Reconcile `docs/CURRENT_STATE.md` and `reports/LATEST.md`; do not paste logs.
+7. Stop for written owner acceptance. Do not merge, push, change approved architecture/backend/schema or start another milestone without explicit approval. A handoff or tool permission is not authorization.
 
 ## Nonnegotiables
 - Vector document is authoritative; GPU meshes and caches are derived.
@@ -30,4 +30,6 @@ Source of truth: verified repository HEAD plus approved ADRs. Historical ZIPs ar
 - No copying proprietary app assets or source.
 
 ## Context efficiency
-Use symbol search and narrow reads. Don't dump whole files without need. Keep `docs/CURRENT_STATE.md` and `reports/LATEST.md` concise and accurate. Review diffs rather than whole chat histories. Limit concurrent agents editing the same subsystem.
+Reuse verified session facts. Use symbol searches, narrow reads and diffs rather than repeated file dumps or chat histories. Keep automatic compaction and provider safeguards. If a usage warning arrives, prioritize integration, verification and a clean checkpoint; do not infer remaining subscription allowance from token counts.
+
+The lead owns implementation and integration. Delegate only bounded work, no routine Git/docs/trivial commands. Default to at most two concurrent children; explain exceptions. Send task/acceptance criteria, baseline and review-target SHA (or exact worktree diff), relevant files/dependencies, exclusive ownership and evidence expected. Reviewers inspect an actual diff artifact and relevant source/tests; report severity, file/line, reproducer and evidence gaps. For uncommitted review material the lead can save a diff under ignored `captures/` and identify any untracked paths separately. Approve QA/general edits only for explicitly assigned paths, once rather than persisting broad approval.

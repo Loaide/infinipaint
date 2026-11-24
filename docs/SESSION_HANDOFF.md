@@ -1,6 +1,7 @@
-# Session handoff — M01 accepted and complete
+# Session handoff — W01 owner gate; M01 remains accepted
 
-- **Resume branch:** `main`. Tested application: `ac4310a6c4cf1c6eb0e864bbd84dc48c5654cb78`; inspected pre-closure checkpoint: `3ce79abd71df2db2ed0fb2eeeda3c3b5a7cc9204`. Only documentation changed after the tested commit. The closure commit containing this handoff is the fast-forward publication target; preserve `feature/m01-app-foundation`.
+- **Resume branch:** `chore/w01-agent-efficiency`, based on verified local/remote `main` `93e2344b9b078d04da30727faa8817d3e85a3e2c`. The W01 commit containing this handoff is local. Tested application: `ac4310a6c4cf1c6eb0e864bbd84dc48c5654cb78`; app, build, tests and diagnostic harnesses are unchanged.
 - **Implemented:** real camera/gesture JVM tests, saved camera/modes, separate EGL context and viewport handling, single renderer owner, bounded frame-request/callback diagnostics and debug CI workflow. Java/JNI/GLES2 baseline retained; [decision register](DECISIONS.md) unchanged.
 - **Evidence:** previous local debug build, 4 ABIs, 10 JVM tests, host replays and mock GLES passed; lint 0 errors/8 warnings. Owner approved all 17 checks on SM-X626B, including actual context recreation. Supplied captures: 79.047 s of idle with zero requests or callbacks. [Measurements, provenance and limitations](../reports/LATEST.md).
-- **Next:** await separate execution authorization for M02 (live ink). World-float precision, in-memory strokes and linear culling remain diagnostic limits.
+- **W01:** native V2 configuration, Standard model routing, scoped agents, compact instructions and PowerShell/skill tooling. [Activation, usage baseline and verification](W01_WORKFLOW.md). Loaded policy and script behavior verified; no new model dispatch or Android rebuild for validation.
+- **Next:** owner reviews W01 and verifies the primary session's model selection on activation. Do not merge, push or start M02 (live ink) without separate authorization. World-float precision, in-memory strokes and linear culling remain diagnostic limits.
