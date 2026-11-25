@@ -12,3 +12,6 @@ The [full historical ADRs](../references/legacy-documentation/docs/DECISIONS.md)
 |Approved|011 Git and documentation as source of truth|Local snapshot is identifiable by reference bytes but has no Git identity.|
 
 Pre-M01 update: repository identity is verified and M00.5 compilation repair accepted (see [handoff](SESSION_HANDOFF.md)). Acceptance of the diagnostic baseline does not select a production architecture. Kotlin shell transition and JNI boundaries remain pending; later decisions require evidence before selecting a renderer, coordinate hierarchy, persistence format, UI framework, cache budgets or LOD tolerances. [Proposal](ARCHITECTURE_PROPOSAL.md); [evidence](M00_AUDIT.md).
+## Pending M03 decision (not approved)
+
+[ADR-013 proposal: document edits and durable revisions](M03_PROPOSAL.md). Awaiting written owner decision; no persistent schema or implementation yet.
