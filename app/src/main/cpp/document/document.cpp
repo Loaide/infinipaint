@@ -1,4 +1,5 @@
 #include "document.hpp"
+#include "codec.hpp"
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -16,10 +17,11 @@ size_t retained(const Value& v) noexcept {
     return overhead + cap*sizeof(input::RawInputPoint);
 }
 bool valid(const Value& v) noexcept {
-    return v.ink && !v.ink->samples.empty() && v.ink->samples.size()<=1000000 &&
+    return v.ink && v.ink->valid() &&
            std::isfinite(v.dx) && std::isfinite(v.dy);
 }
 }
+Ink::Ink(input::RawInputStroke&& s,Brush b):samples(std::move(s)),brush(b),valid_(wire::validInk(*this)) {}
 Document::Document(Uuid identity, Budget budget):identity_(identity),budget_(budget) {
     if (std::all_of(identity.begin(),identity.end(),[](auto b){return !b;}))
         throw std::invalid_argument("nil document identity");
@@ -27,6 +29,21 @@ Document::Document(Uuid identity, Budget budget):identity_(identity),budget_(bud
 bool Document::grant(Id first, Id last) noexcept {
     if (first<=ceiling_ || last<first || issued_!=ceiling_) return false;
     issued_=first-1; ceiling_=last; return true;
+}
+Status Document::restore(Id id,Id prev,Value v,Revision content,Revision geometry,Revision durable,Id reservedThrough) {
+    if(sink_ || ceiling_ || revision_ || !groups_.empty() || id<=0 || id>reservedThrough ||
+       prev!=last_ || geometry<=0 || geometry>content || content>durable || !valid(v))
+        return Status::Invalid;
+    try {
+        if(!rows_.emplace(id,Record{std::move(v),prev,0,content,geometry}).second) return Status::Invalid;
+        (last_?rows_.at(last_).next:first_)=id; last_=id;
+        return Status::Ok;
+    } catch(const std::bad_alloc&) {return Status::Memory;}
+}
+Status Document::finishRestore(Revision durable,Id reservedThrough) noexcept {
+    if(sink_ || ceiling_ || revision_ || !groups_.empty() || durable<0 || reservedThrough<0 ||
+       (!rows_.empty() && rows_.rbegin()->first>reservedThrough)) return Status::Invalid;
+    revision_=durable; issued_=ceiling_=reservedThrough; return Status::Ok;
 }
 const Record* Document::find(Id id) const noexcept {
     auto it=rows_.find(id); return it==rows_.end()?nullptr:&it->second;
@@ -111,6 +128,7 @@ Status Document::edit(Revision expected,std::span<const Edit> edits) {
         }
     } catch(const std::bad_alloc&) { return abort(Status::Memory); }
       catch(const std::length_error&) { return abort(Status::Memory); }
+      catch(...) { replay(g,false); throw; }
     while(groups_.size()>cursor_+1) {
         historyBytes_-=groups_[groups_.size()-2].charge;
         groups_.pop_back();
@@ -146,6 +164,7 @@ Status Document::history(Revision expected,bool forwards) {
         try { s=sink_->prepare(*this,g.touches); }
         catch(const std::bad_alloc&) { s=Status::Memory; }
         catch(const std::length_error&) { s=Status::Memory; }
+        catch(...) { replay(g,!forwards); throw; }
         if(s!=Status::Ok) {replay(g,!forwards);return s;}
     }
     publish(g);

@@ -20,12 +20,17 @@
 
 #include "input/input_processor.hpp"
 #include "document/document.hpp"
-#ifdef IP_REPLAY_TEST
+#include "document/change_queue.hpp"
 #include "document/codec.hpp"
+#include "tablet/session.hpp"
 #include <cstring>
-#endif
 #include "stroke/spline.hpp"
 
+namespace engine::tablet {
+struct AdoptAccepted final : document::Ink {
+    AdoptAccepted(input::InputProcessor& p,document::Brush b):Ink(std::move(p).release_raw(),b,true) {}
+};
+}
 namespace {
 
     using namespace engine;
@@ -72,6 +77,7 @@ namespace {
         Mesh tailMesh;
         Bounds bounds;
         document::Brush brush;
+        std::shared_ptr<const document::Ink> sealed;
         std::shared_ptr<CompletedGeometry> completion=std::make_shared<CompletedGeometry>();
         uint64_t tailRevision = 0;
 
@@ -145,7 +151,20 @@ namespace {
         float minX = 0, minY = 0, maxX = 0, maxY = 0;
         uint64_t liveId=0;
     };
-    std::deque<FinishedTrace> finished;
+    using Key=document::Id;
+    struct Published {
+        Key next=0;
+        document::Revision geometry=0;
+        std::shared_ptr<FinishedTrace> shape;
+    };
+    using Scene=std::map<Key,Published>;
+    Scene finished, pendingScene;
+    Key sceneHead=0;
+    std::unique_ptr<document::Document> model;
+    document::ChangeQueue saves;
+    bool persistent=false;
+    bool suspended=false;
+    std::atomic<int64_t> visibleRevision{0};
     // Stable IDs are assigned under stateMutex; GPU resources live only on GL thread.
     uint64_t finishedEpoch = 1;
     struct CachedGpuStroke {
@@ -153,11 +172,12 @@ namespace {
         std::array<GLuint, 3> vbo{};
         std::array<GLsizei, 3> count{};
         float minX=0, minY=0, maxX=0, maxY=0;
+        Key next=0;
+        document::Revision geometry=0;
     };
     // GL thread maintains append-only cache; completed CPU meshes are copied only
     // when first received, never once per animation frame.
-    std::vector<CachedGpuStroke> gpuFinished;
-    size_t glFinishedCount = 0;
+    std::map<Key,CachedGpuStroke> gpuFinished;
     uint64_t gpuEpoch = 0;
     uint64_t cacheUploadBytes = 0;
     uint64_t liveUploadBytes = 0;
@@ -648,21 +668,29 @@ void main() {
     }
 
     void deleteGpuCache() {
-        for (auto& item : gpuFinished)
+        for (auto& [id,item] : gpuFinished)
             for (GLuint vbo : item.vbo) if (vbo) glDeleteBuffers(1, &vbo);
         gpuFinished.clear();
-        glFinishedCount = 0;
     }
 
-    void cacheFinished(const FinishedTrace& trace) {
-        CachedGpuStroke item;
+    void cacheFinished(Key id,const Published& patch) {
+        auto it=gpuFinished.find(id);
+        if(it!=gpuFinished.end()) {
+            it->second.next=patch.next;
+            if(patch.shape && it->second.geometry==patch.geometry) return;
+            for(auto v:it->second.vbo) if(v) glDeleteBuffers(1,&v);
+            gpuFinished.erase(it);
+        }
+        if(!patch.shape) return;
+        auto& item=gpuFinished[id];
+        const auto& trace=*patch.shape;
+        item.geometry=patch.geometry; item.next=patch.next;
         item.source = {trace.raw, trace.clean, trace.spline};
         item.minX = trace.minX; item.minY = trace.minY;
         item.maxX = trace.maxX; item.maxY = trace.maxY;
-        gpuFinished.push_back(std::move(item));
         auto previous=gpuLive.find(trace.liveId);
         if(previous==gpuLive.end()) return;
-        auto& completed=gpuFinished.back();
+        auto& completed=item;
         for(size_t i=0;i<3;++i) {
             auto& prefix=previous->second[i];
             const auto n=completed.source[i]->size();
@@ -723,6 +751,61 @@ void main() {
 // ==================================================
 
 extern "C" {
+
+static bool reconstructV1(const std::shared_ptr<const document::Ink>&,FinishedTrace&);
+struct SceneSink final : document::Observer {
+    std::shared_ptr<FinishedTrace> appended;
+    bool worker=false;
+    document::Status prepare(const document::Document& doc,std::span<const document::Touched> touched) override {
+        Scene stage;
+        bool valid=true;
+        auto include=[&](Key id,bool changed) {
+            if(!id) return;
+            auto& dst=stage[id];
+            const auto* r=doc.find(id);
+            if(!r) return;
+            dst.next=r->next;
+            if(changed && dst.geometry!=doc.revision()+1) {
+                dst.geometry=doc.revision()+1;
+                if(appended) dst.shape=appended;
+                else {
+                    dst.shape=std::make_shared<FinishedTrace>();
+                    if(!reconstructV1(r->value.ink,*dst.shape)) valid=false;
+                }
+            } else if(!dst.shape) {dst=finished.at(id);dst.next=r->next;}
+        };
+        // Subjects first: adjacent new subjects may not yet have a projection.
+        for(auto e:touched) include(e.id,true);
+        if(!valid) return document::Status::Invalid;
+        for(auto e:touched) {include(e.prev,false);include(e.next,false);}
+        Scene notifications=stage;
+        std::unique_lock lock(stateMutex,std::defer_lock);
+        if(worker) lock.lock();
+        if(persistent) {
+            auto s=saves.prepare(doc,touched);
+            if(s!=document::Status::Ok) return s;
+        }
+        for(auto& [id,p]:stage) finished.erase(id);
+        for(auto it=stage.begin();it!=stage.end();) {
+            if(!it->second.shape) it=stage.erase(it); else ++it;
+        }
+        finished.merge(stage);
+        for(auto& [id,p]:notifications) pendingScene.erase(id);
+        pendingScene.merge(notifications);
+        sceneHead=doc.first();
+        return document::Status::Ok;
+    }
+};
+static SceneSink sceneSink;
+static bool readyModel() {
+#ifndef __ANDROID__
+    if(!model) {
+        model=std::make_unique<document::Document>(document::Uuid{1});
+        model->grant(1,INT64_MAX); model->observe(&sceneSink);
+    }
+#endif
+    return bool(model);
+}
 
 // --------------------------------------------------
 // Camera
@@ -795,6 +878,7 @@ Java_com_infinipaint_demo_NativeBridge_begin(
     }
 
     try {
+        if(!readyModel() || suspended || !model->canAllocate() || live.count(id)) return JNI_FALSE;
         auto trace=std::make_unique<Trace>(std::move(inputProcessor.value()),std::move(fitter.value()));
         trace->strokeRadiusWorld = (float)(1.9 / cameraZoom);
         trace->brush.filter=params;
@@ -802,7 +886,9 @@ Java_com_infinipaint_demo_NativeBridge_begin(
         trace->brush.tool=static_cast<uint32_t>(tool);
         if (!trace->input.begin_stroke()) return JNI_FALSE;
         trace->gpuId = nextLiveGpuId++;
-        live[id] = std::move(trace);
+        if(persistent && !saves.admitStroke()) return JNI_FALSE;
+        try {live.emplace(id,std::move(trace));}
+        catch(...) {if(persistent) saves.cancelStroke(); throw;}
         return JNI_TRUE;
     } catch(const std::bad_alloc&) { return JNI_FALSE; }
 }
@@ -841,6 +927,13 @@ Java_com_infinipaint_demo_NativeBridge_sample(
     // Convert screen-space input into world space.
     // This keeps strokes anchored when panning or zooming.
 
+    if(trace.sealed) return JNI_FALSE;
+    if(persistent) {
+        const auto& raw=trace.input.raw_samples();
+        size_t capacity=raw.capacity();
+        if(raw.size()==capacity) capacity=std::min<size_t>(1000000,std::max<size_t>(1,capacity*2));
+        if(!saves.growStroke(capacity*sizeof(input::RawInputPoint))) return JNI_FALSE;
+    }
     double worldX =
             cameraPanX + x / cameraZoom;
 
@@ -971,26 +1064,23 @@ Java_com_infinipaint_demo_NativeBridge_end(
     }
 
     auto& trace = *it->second;
-    if(trace.input.raw_samples().empty()) return JNI_FALSE;
+    if(!trace.sealed && trace.input.raw_samples().empty()) return JNI_FALSE;
     // Allocate the ordered slot before touching live meshes. No render can
     // observe it until populated. Sample preflight reserved terminal geometry.
-    std::shared_ptr<const document::Ink> record;
     try {
-        finished.emplace_back();
-        // Allocate the immutable record before moving accepted samples. No fallible
-        // geometry operation follows this transfer (terminal capacity is reserved).
-        try {
-            // release_raw returns by value; do not call it as a make_shared argument:
-            // if allocation failed the still-live stroke would have lost its history.
-            struct CommitRecord final : document::Ink {
-                CommitRecord(input::InputProcessor& p,document::Brush b)
-                    : Ink(std::move(p).release_raw(),b) {}
-            };
-            record=std::make_shared<CommitRecord>(trace.input,trace.brush);
-        } catch (...) { finished.pop_back(); throw; }
+        auto shape=std::make_shared<FinishedTrace>();
+        if(!trace.sealed) trace.sealed=std::make_shared<tablet::AdoptAccepted>(trace.input,trace.brush);
+        document::Edit add{document::Edit::InsertAfter,model->last(),{trace.sealed}};
+        sceneSink.appended=shape;
+        saves.committingStroke(true);
+        auto result=model->edit(model->revision(),{&add,1});
+        saves.committingStroke(false);
+        sceneSink.appended.reset();
+        if(result!=document::Status::Ok) return JNI_FALSE;
+        *shape=finishV1(trace,std::move(trace.sealed));
+        visibleRevision.store(model->revision());
     } catch(const std::bad_alloc&) { return JNI_FALSE; }
 
-    finished.back()=finishV1(trace,std::move(record));
     const auto ink=trace.completion;
     const size_t rawSamples=trace.rawPoints.size()/2, cleanSamples=trace.cleanPoints.size()/2;
     auto retired=std::move(it->second);
@@ -1052,11 +1142,82 @@ static FinishedTrace finishV1(Trace& trace,std::shared_ptr<const document::Ink> 
     return true;
 }
 
+JNIEXPORT jlong JNICALL Java_com_infinipaint_demo_NativeBridge_revision(JNIEnv*,jclass) {
+    return visibleRevision.load();
+}
+JNIEXPORT void JNICALL Java_com_infinipaint_demo_NativeBridge_suspend(JNIEnv*,jclass,jboolean value) {
+    std::lock_guard guard(stateMutex);suspended=value;
+}
+static bool hit(const FinishedTrace& ink,core::Vec2 a,core::Vec2 b,double tolerance) {
+    if(std::max(a.x,b.x)+tolerance<ink.minX || std::min(a.x,b.x)-tolerance>ink.maxX ||
+       std::max(a.y,b.y)+tolerance<ink.minY || std::min(a.y,b.y)-tolerance>ink.maxY) return false;
+    auto delta=b-a;double len=delta.length_sq();
+    for(size_t i=0;i<ink.spline->size();i+=6) {
+        const auto& v=(*ink.spline)[i];
+        auto separation=[&](double t) {
+            core::Vec2 p{v.x+t*v.len*v.dirX,v.y+t*v.len*v.dirY};
+            auto rel=p-a;
+            double u=len?std::clamp((rel.x*delta.x+rel.y*delta.y)/len,0.,1.):0.;
+            return (rel-delta*u).length()-std::lerp(double(v.radius),double(v.endRadius),t)-tolerance;
+        };
+        if(separation(0)<=0 || separation(1)<=0) return true;
+        // Convex distance to swept segment minus linearly varying ink radius.
+        double lo=0,hi=1;
+        for(int j=0;j<36;j++) {
+            double l=(2*lo+hi)/3,r=(lo+2*hi)/3;
+            double dl=separation(l),dr=separation(r);
+            if(std::min(dl,dr)<=0) return true;
+            if(dl<=dr) hi=r; else lo=l;
+        }
+    }
+    return false;
+}
+JNIEXPORT jint JNICALL Java_com_infinipaint_demo_NativeBridge_command(JNIEnv* env,jclass,jint op,
+                                                                      jdoubleArray path,jdouble tolerance) {
+    using S=document::Status;
+    {
+        std::lock_guard guard(stateMutex);
+        if(!model || !suspended || !live.empty()) return int(S::Conflict);
+    }
+    // Single catalog worker; input stays suspended until main receives completion.
+    sceneSink.worker=true;
+    struct Reset {~Reset(){sceneSink.worker=false;}} reset;
+    auto rev=model->revision();
+    S result=S::Invalid;
+    try {
+        if(op==1) result=model->undo(rev);
+        if(op==2) result=model->redo(rev);
+        if(op==3) result=model->clear(rev);
+        if(op==4 && path && tolerance>=0 && std::isfinite(tolerance)) {
+            auto n=env->GetArrayLength(path);
+            if(n<2 || n>8192 || n%2) return int(S::Invalid);
+            std::vector<double> points(n);
+            env->GetDoubleArrayRegion(path,0,n,points.data());
+            if(env->ExceptionCheck()) return int(S::Invalid);
+            std::map<Key,bool> removed;
+            std::vector<document::Edit> edits;
+            for(int i=0;i<n;i+=2) {
+                core::Vec2 a{points[std::max(0,i-2)],points[std::max(0,i-2)+1]},b{points[i],points[i+1]};
+                if(!a.finite() || !b.finite()) return int(S::Invalid);
+                for(Key id=model->last();id;id=model->find(id)->prev) {
+                    if(!removed.count(id) && hit(*finished.at(id).shape,a,b,tolerance)) {
+                        edits.push_back({document::Edit::Remove,id});removed.emplace(id,true);break;
+                    }
+                }
+            }
+            result=model->edit(rev,edits);
+        }
+        if(result==S::Ok) visibleRevision.store(model->revision());
+    } catch(const std::bad_alloc&) {return int(S::Memory);}
+    return int(result);
+}
+
 #ifdef IP_REPLAY_TEST
 // Single-threaded Mesa harness only. Cross the codec boundary, throw away old
 // derived meshes and require byte-identical vertex streams before pixel readback.
 bool ipTestCodecReplay() {
-    for(auto& old:finished) {
+    for(auto& [id,pub]:finished) {
+        auto& old=*pub.shape;
         using namespace document::wire;
         const auto& src=*old.record;
         Header h;
@@ -1097,7 +1258,7 @@ Java_com_infinipaint_demo_NativeBridge_cancel(
 
     std::lock_guard<std::mutex> guard(stateMutex);
 
-    live.erase(id);
+    if(live.erase(id) && persistent) saves.cancelStroke();
 }
 
 // --------------------------------------------------
@@ -1113,8 +1274,8 @@ Java_com_infinipaint_demo_NativeBridge_clear(
     std::lock_guard<std::mutex> guard(stateMutex);
 
     live.clear();
-    finished.clear();
-    ++finishedEpoch;
+    saves.cancelStroke();
+    if(model) (void)model->clear(model->revision());
 }
 
 // --------------------------------------------------
@@ -1141,7 +1302,6 @@ Java_com_infinipaint_demo_NativeBridge_contextCreated(JNIEnv*, jclass) {
     // names may identify unrelated objects in the newly current context.
     gpuFinished.clear();
     gpuLive.clear();
-    glFinishedCount = 0;
     gpuEpoch = 0;
     program = 0;
     buffer = 0;
@@ -1323,7 +1483,8 @@ Java_com_infinipaint_demo_NativeBridge_render(
         ++validSampleFrames;
     }
 
-    std::vector<FinishedTrace> newCompleted;
+    Scene newCompleted;
+    Key frameHead=0;
     uint64_t frameEpoch = 0;
     std::vector<std::pair<uint64_t, ViewTrace>> active;
 
@@ -1343,10 +1504,11 @@ Java_com_infinipaint_demo_NativeBridge_render(
 
         frameEpoch = finishedEpoch;
         // Epoch mismatch means clear; GL thread will retire old cache below.
-        if (gpuEpoch != frameEpoch) glFinishedCount = 0;
-        for (size_t i = glFinishedCount; i < finished.size(); ++i)
-            newCompleted.push_back(finished[i]);
-        glFinishedCount = finished.size();
+        if(gpuEpoch!=frameEpoch) {
+            newCompleted=finished;
+            pendingScene.clear();
+        } else newCompleted.swap(pendingScene);
+        frameHead=sceneHead;
 
         active.reserve(live.size());
 
@@ -1436,15 +1598,16 @@ Java_com_infinipaint_demo_NativeBridge_render(
         deleteGpuCache();
         gpuEpoch = frameEpoch;
         // This frame already captured the full replacement snapshot.
-        glFinishedCount = newCompleted.size();
     }
-    for (const FinishedTrace& trace : newCompleted) cacheFinished(trace);
+    for (const auto& [id,patch] : newCompleted) cacheFinished(id,patch);
     // Cull in the same quantized viewport used by the existing float shader.
     const double viewMinX = (float)framePanX, viewMinY = (float)framePanY;
     const double viewMaxX = viewMinX + width/(double)(float)frameZoom;
     const double viewMaxY = viewMinY + height/(double)(float)frameZoom;
     uint64_t visibleCompleted = 0;
-    for (auto& cached : gpuFinished) {
+    for (Key id=frameHead;id;) {
+        auto& cached=gpuFinished.at(id);
+        id=cached.next;
         if (cached.maxX < viewMinX || cached.minX > viewMaxX ||
             cached.maxY < viewMinY || cached.minY > viewMaxY) continue;
         ++visibleCompleted;
@@ -1582,3 +1745,39 @@ Java_com_infinipaint_demo_NativeBridge_render(
 }
 
 } // extern "C"
+
+namespace engine::tablet {
+bool install(std::unique_ptr<document::Document> candidate,size_t meshBudget) {
+    Scene replacement;
+    for(Key id=candidate->first();id;) {
+        const auto& r=*candidate->find(id);
+        auto shape=std::make_shared<FinishedTrace>();
+        if(!reconstructV1(r.value.ink,*shape)) return false;
+        for(const auto& mesh:{shape->raw,shape->clean,shape->spline}) {
+            if(mesh->capacity()>meshBudget/sizeof(Vertex)) return false;
+            meshBudget-=mesh->capacity()*sizeof(Vertex);
+        }
+        replacement.emplace(id,Published{r.next,r.geometry,std::move(shape)});
+        id=r.next;
+    }
+    Scene retired;
+    {
+        std::lock_guard guard(stateMutex);
+        if(!live.empty() || saves.size() || (model && !suspended)) return false;
+        model.swap(candidate);
+        finished.swap(replacement);
+        retired.swap(pendingScene);
+        sceneHead=model->first();
+        ++finishedEpoch; persistent=true;
+        model->observe(&sceneSink);
+        visibleRevision.store(model->revision());
+    }
+    return true;
+}
+std::shared_ptr<const document::ChangeSet> nextSave() {
+    std::lock_guard guard(stateMutex); return saves.front();
+}
+bool acknowledge(const std::shared_ptr<const document::ChangeSet>& token) {
+    std::lock_guard guard(stateMutex); return saves.acknowledge(token);
+}
+}

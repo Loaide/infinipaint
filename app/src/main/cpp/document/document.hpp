@@ -9,6 +9,7 @@
 #include <span>
 #include <vector>
 
+namespace engine::tablet { struct AdoptAccepted; }
 namespace engine::document {
 using Id = std::int64_t; // Positive, scoped by UUID. Zero is the sequence sentinel.
 using Uuid = std::array<std::uint8_t, 16>;
@@ -24,8 +25,15 @@ struct Brush {
 struct Ink {
     const input::RawInputStroke samples;
     const Brush brush;
-    Ink(input::RawInputStroke&& accepted, Brush captured):
-        samples(std::move(accepted)), brush(captured) {}
+    Ink(input::RawInputStroke&& samples, Brush captured);
+    bool valid() const noexcept { return valid_; }
+private:
+    // Only the streaming v1 capture path can attest to per-sample validation
+    // without a second O(n) pass while the pen-up mutex is held.
+    friend struct engine::tablet::AdoptAccepted;
+    Ink(input::RawInputStroke&& accepted, Brush captured, bool validated):
+        samples(std::move(accepted)), brush(captured), valid_(validated) {}
+    const bool valid_;
 };
 struct Value {
     std::shared_ptr<const Ink> ink;
@@ -61,6 +69,12 @@ public:
     Document(const Document&) = delete;
     Document& operator=(const Document&) = delete;
     bool grant(Id first, Id last) noexcept;
+    // Build only a not-yet-published candidate in persisted order. Not an edit;
+    // requires fresh history and no ID grant. Caller checks expected count/endpoints.
+    Status restore(Id id, Id prev, Value, Revision content, Revision geometry,
+                   Revision durable, Id reservedThrough);
+    Status finishRestore(Revision durable, Id reservedThrough) noexcept;
+    bool canAllocate() const noexcept {return issued_<ceiling_;}
     void observe(Observer* sink) noexcept { sink_=sink; }
     Status edit(Revision expected, std::span<const Edit> group);
     Status clear(Revision expected);

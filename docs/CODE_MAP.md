@@ -14,3 +14,9 @@ There is no durable document store or production spatial index in this baseline.
 M02: `native_bridge.cpp` owns sample preflight, capture-zoom tessellation, tapered capsule shaders and completed geometry publication. `stroke/spline.{cpp,hpp}` holds the ordered attribute history, cached Hermite coefficients and interpolation-error bound. `FrameTelemetry` exposes recent timing distributions only on dump. Start validation at `diagnostics/run_m02.sh` (input/faults/scaling, mock bridge and real Mesa pbuffer); see [tablet gate](M02_TABLET.md).
 
 Hardening: `coverageLayer` gathers one representation, accumulates into scissored window alpha and resolves in temporal order; `cacheFinished` conditionally adopts successful live VBO prefixes. `SplineFitter::coefficients` is shared by batch fitting and the fixed four-knot append workspace. `diagnostics/tessellation_probe.hpp` reports cap hits and interpolation error.
+M03 (in progress): `app/src/main/cpp/document/` contains linked order/ID ownership,
+reversible edit groups, save delta queue and v1 header/sample codec. `native_bridge.cpp`
+contains `appendV1`, `finishV1` and `reconstructV1` (no GL calls in reconstruction).
+`storage/DocumentDatabase.java` under the Java package is the worker-confined SQLite
+adapter. Host core oracle: `diagnostics/run_m03.sh`; matched reconstruction pixels:
+`diagnostics/run_m02.sh pixels`. Android storage fixtures are under `app/src/androidTest/`.

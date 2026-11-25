@@ -1,4 +1,5 @@
 #include "document/codec.hpp"
+#include "document/change_queue.hpp"
 #include <cassert>
 #include <cstdio>
 #include <random>
@@ -97,8 +98,30 @@ void oracle() {
         assert(!id && prev==d.last() && d.size()==states[cursor].size());
     }
 }
+
+void saturation() {
+    Document d({2});
+    ChangeQueue q;
+    d.observe(&q);
+    assert(d.grant(1,1000));
+    Edit e{Edit::InsertAfter,0,dot()};
+    assert(q.admitStroke() && !q.admitStroke() && !q.growStroke(SIZE_MAX));
+    assert(q.growStroke(sizeof(engine::input::RawInputPoint)));
+    for(int i=0;i<31;i++) assert(d.edit(d.revision(),{&e,1})==Status::Ok);
+    assert(d.edit(d.revision(),{&e,1})==Status::QueueLimit && d.size()==31 && q.size()==31);
+    q.committingStroke(true);
+    assert(d.edit(d.revision(),{&e,1})==Status::Ok && q.size()==32);
+    q.committingStroke(false);
+    auto stale=q.front();
+    assert(stale->base==0 && !q.admitStroke());
+    assert(d.undo(d.revision())==Status::QueueLimit && d.size()==32);
+    assert(q.acknowledge(stale) && !q.acknowledge(stale));
+    assert(d.undo(d.revision())==Status::Ok && d.size()==31);
+    while(auto token=q.front()) assert(q.acknowledge(token));
+    assert(!q.bytes() && q.admitStroke()); q.cancelStroke(); assert(!q.bytes());
+}
 }
 int main() {
-    codec(); edits(); oracle();
-    std::puts("PASS M03 v1 codec, reversible splices, history, ID ranges, seeded 10000-step ordered oracle");
+    codec(); edits(); oracle(); saturation();
+    std::puts("PASS M03 v1 codec, reversible splices, history, ID ranges, seeded 10000-step ordered oracle, queue reserve/saturation/retry");
 }

@@ -209,11 +209,51 @@ public final class DocumentDatabaseTest {
 
     private void assertStoredViews(UUID first, long seq, double x, double y, double zoom,
                                    UUID second) {
-        // There is no load-view API yet. Read the persisted row after all writer handles close.
+        // Independent SQL oracle checks both the view and the separate edit revision.
         try (SQLiteDatabase db = SQLiteDatabase.openDatabase(catalog.getPath(), null,
                 SQLiteDatabase.OPEN_READONLY)) {
             assertStoredView(db, first, seq, x, y, zoom);
             assertStoredView(db, second, 1, -20, 30, .5);
+        }
+    }
+
+    @Test
+    public void longRecordAndFaultedGroupsRecoverAtPreviousRevision() {
+        final int n=41633;
+        UUID id;
+        try(DocumentDatabase db=DocumentDatabase.open(catalog,true)) {
+            id=db.createDocument();
+            assertEquals(1,db.reserve(id,10));
+            db.commit(id,0,1,1,1,w->w.insert(1,0,0,new byte[80],n,
+                    i->new byte[Math.min(n*36-i*DocumentDatabase.CHUNK_BYTES,DocumentDatabase.CHUNK_BYTES)]));
+            assertThrows(IllegalArgumentException.class,()->db.commit(id,1,2,2,1,w->{
+                w.remove(1);
+                w.insert(2,0,0,new byte[80],1,i->new byte[35]);
+            }));
+            assertThrows(SQLiteException.class,()->db.commit(id,1,1,1,1,w->{
+                // Catching a failed operation cannot turn a partial change into a commit.
+                try {w.insert(2,1,1,new byte[80],1,i->new byte[36]);}
+                catch(SQLiteException ignored) { }
+            }));
+            assertThrows(IllegalStateException.class,()->db.commit(id,1,0,0,0,w->{
+                w.clear();
+                db.commit(id,1,0,0,0,ignored->{});
+            }));
+            assertThrows(SQLiteException.class,()->db.commit(id,1,0,0,0,w->{}));
+        }
+        try(DocumentDatabase db=DocumentDatabase.open(catalog,false)) {
+            int[] read={0,0};
+            db.load(id,1,n*36,new DocumentDatabase.Restore() {
+                public void begin(UUID doc,long revision,long ceiling,long count) {
+                    assertEquals(id,doc); assertEquals(1,revision); assertEquals(10,ceiling); assertEquals(1,count);
+                }
+                public void stroke(long stroke,long prev,long next,long content,long geometry,int count,byte[] h) {
+                    assertEquals(1,stroke); assertEquals(0,prev); assertEquals(0,next); assertEquals(n,count);
+                }
+                public void chunk(byte[] b) { assertTrue(b.length<=DocumentDatabase.CHUNK_BYTES); read[0]+=b.length; }
+                public void endStroke() {read[1]++;}
+            });
+            assertArrayEquals(new int[]{n*36,1},read);
         }
     }
 

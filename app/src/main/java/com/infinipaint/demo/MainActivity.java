@@ -2,6 +2,8 @@
 package com.infinipaint.demo;
 
 import android.app.Activity;
+import android.app.AlertDialog;
+import com.infinipaint.storage.EditorStore;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.SystemClock;
@@ -21,7 +23,15 @@ import java.io.FileDescriptor;
 import java.io.PrintWriter;
 import java.util.Locale;
 
-public final class MainActivity extends Activity {
+public final class MainActivity extends Activity implements EditorStore.Listener {
+    private EditorStore documents;
+    private boolean eraseMode,erasing,prefixOnly;
+    private static int retryEndId=-1; // process-session pending commit survives Activity recreation
+    private final double[] erasePath=new double[8192];
+    private int eraseCount;
+    @Override public void changed() {updateStatus();requestCanvasRender(FrameTelemetry.Reason.OTHER);}
+    @Override public void restore(double x,double y,double zoom) {camera.restore(x,y,zoom);updateCamera();}
+    private void notice(String msg) {android.widget.Toast.makeText(this,msg,android.widget.Toast.LENGTH_LONG).show();}
 
     private static final String TAG = "IP90_INPUT";
 
@@ -115,6 +125,7 @@ public final class MainActivity extends Activity {
 
     private void updateCamera() {
         NativeBridge.setCamera(camera.panX(), camera.panY(), camera.zoom());
+        if(documents!=null) documents.camera(camera.panX(),camera.panY(),camera.zoom());
         requestCanvasRender(FrameTelemetry.Reason.CAMERA);
     }
 
@@ -134,7 +145,7 @@ public final class MainActivity extends Activity {
                 "Zoom %.2fx | Render %.0f Hz | %s",
                 camera.zoom(),
                 measuredFps,
-                stylusId >= 0 ? "STYLUS DRAWING" : "READY"
+                stylusId >= 0 ? (erasing?"ERASING":"STYLUS DRAWING") : documents==null?"READY":documents.status()
         ));
     }
 
@@ -160,6 +171,12 @@ public final class MainActivity extends Activity {
         int tool = e.getToolType(index);
 
         if (!isStylus(tool)) return;
+        if(retryEndId>=0) {recoverPrefix();return;}
+        prefixOnly=false;
+        erasing=eraseMode || tool==MotionEvent.TOOL_TYPE_ERASER;
+        if(erasing) {
+            eraseCount=0;stylusId=id;resetFingers();sendStylusSample(e,index,-1);return;
+        }
 
         Log.i(TAG, "Stylus DOWN, tool=" + tool
                 + ", id=" + id);
@@ -176,6 +193,7 @@ public final class MainActivity extends Activity {
             updateStatus();
         } else {
             Log.e(TAG, "NativeBridge.begin rejected stylus");
+            notice("Stroke not started: document busy, ID range exhausted or save queue full. Retry Save.");
         }
     }
 
@@ -184,7 +202,7 @@ public final class MainActivity extends Activity {
             int index,
             int history
     ) {
-        if (stylusId < 0) return;
+        if (stylusId < 0 || prefixOnly) return;
 
         float x = history < 0
                 ? e.getX(index)
@@ -234,6 +252,13 @@ public final class MainActivity extends Activity {
             return;
         }
 
+        if(erasing) {
+            if(eraseCount>=erasePath.length) {
+                prefixOnly=true;notice("Eraser gesture limit: lift to apply the accepted path.");return;
+            }
+            erasePath[eraseCount++]=camera.panX()+x/camera.zoom();
+            erasePath[eraseCount++]=camera.panY()+y/camera.zoom();return;
+        }
         // Record every raw Android sample before the native processing path.
         final long sampleNs = timestampNs;
         final long callbackNs = SystemClock.uptimeMillis() * 1_000_000L;
@@ -257,7 +282,8 @@ public final class MainActivity extends Activity {
                 accepted ? ("DUPLICATE_TIMESTAMP".equals(outcome) ? "ACCEPTED_SAME_TIMESTAMP" : "PENDING".equals(outcome) ? "ACCEPTED" : outcome) : "NATIVE_REJECTED");
         if (!accepted) {
             Log.e(TAG, "NativeBridge.sample rejected input");
-            cancelStylus();
+            prefixOnly=true;
+            notice("Sample rejected. Lift to commit the accepted prefix, or cancel.");
         }
     }
 
@@ -294,10 +320,13 @@ public final class MainActivity extends Activity {
 
         stylusId = -1;
 
-        if (!NativeBridge.end(id)) {
+        if(erasing) {
+            erasing=false;
+            documents.command(4,java.util.Arrays.copyOf(erasePath,eraseCount),6/camera.zoom());
+        } else if (!NativeBridge.end(id)) {
             Log.e(TAG, "NativeBridge.end failed");
-            NativeBridge.cancel(id);
-        }
+            retryEndId=id;recoverPrefix();
+        } else documents.save();
 
         Log.i(TAG, "Stylus UP");
 
@@ -310,10 +339,31 @@ public final class MainActivity extends Activity {
         if (stylusId >= 0) {
             int id = stylusId;
             stylusId = -1;
-            NativeBridge.cancel(id);
+            if(!erasing) NativeBridge.cancel(id);
+            erasing=false;
             requestCanvasRender(FrameTelemetry.Reason.STYLUS);
         }
         updateStatus();
+    }
+    private void recoverPrefix() {
+        new AlertDialog.Builder(this).setTitle("Stroke not committed").setMessage(
+                "The accepted prefix is still on the canvas. Retry after saving, or explicitly discard it.")
+                .setPositiveButton("Retry",(d,w)->{
+                    if(NativeBridge.end(retryEndId)) {retryEndId=-1; documents.save();}
+                    else notice("Still pending. Tap with the pen to retry.");
+                    changed();
+                }).setNegativeButton("Discard prefix",(d,w)->{NativeBridge.cancel(retryEndId);retryEndId=-1;changed();}).show();
+    }
+    private void editMenu() {
+        if(retryEndId>=0) {recoverPrefix();return;}
+        cancelStylus(); resetFingers();
+        String[] options={"Undo","Redo",eraseMode?"Use pen":"Whole-stroke eraser","Save / retry","New document","Open next document"};
+        new AlertDialog.Builder(this).setTitle("Document").setItems(options,(d,i)->{
+            if(i<2) documents.command(i+1,null,0);
+            if(i==2) {eraseMode=!eraseMode;notice(eraseMode?"Whole-stroke eraser":"Pen");}
+            if(i==3) {documents.flushView();documents.save();}
+            if(i>=4) documents.open(i==4,i==5);
+        }).show();
     }
 
     // --------------------------------------------
@@ -621,11 +671,14 @@ public final class MainActivity extends Activity {
         clearButton.setOnClickListener(v -> {
             cancelStylus();
             resetFingers();
-            NativeBridge.clear();
+            if(retryEndId>=0) {recoverPrefix();return;}
+            documents.command(3,null,0);
             requestCanvasRender(FrameTelemetry.Reason.OTHER);
         });
 
         toolbar.addView(clearButton);
+        Button edit=new Button(this);edit.setText("Document");
+        edit.setOnClickListener(v->editMenu());toolbar.addView(edit);
 
         // Put the toolbar in normal layout space.
         // This prevents it from covering the drawing surface
@@ -650,6 +703,7 @@ public final class MainActivity extends Activity {
         );
 
         setContentView(layout);
+        documents=EditorStore.get(this);documents.attach(this);
 
         NativeBridge.setSmoothingPreset(smoothingPreset);
         updateModeButton();
@@ -671,6 +725,7 @@ public final class MainActivity extends Activity {
 
     @Override
     protected void onPause() {
+        documents.flushView(); documents.save();
         if (inputAudit != null) inputAudit.export();
         running = false;
 
@@ -691,6 +746,7 @@ public final class MainActivity extends Activity {
 
     @Override
     protected void onDestroy() {
+        documents.detach(this);
         // Finish any pending diagnostic write; don't retain a worker per rotation.
         inputAudit.close();
         super.onDestroy();

@@ -96,7 +96,7 @@ public final class DocumentDatabase implements Closeable {
         db.execSQL("CREATE TABLE document(uuid TEXT PRIMARY KEY NOT NULL, revision INTEGER NOT NULL DEFAULT 0," +
                 " ceiling INTEGER NOT NULL DEFAULT 0, head INTEGER NOT NULL DEFAULT 0," +
                 " tail INTEGER NOT NULL DEFAULT 0, count INTEGER NOT NULL DEFAULT 0," +
-                " view_seq INTEGER NOT NULL DEFAULT 0, pan_x REAL NOT NULL DEFAULT 0," +
+                " last_token TEXT, view_seq INTEGER NOT NULL DEFAULT 0, pan_x REAL NOT NULL DEFAULT 0," +
                 " pan_y REAL NOT NULL DEFAULT 0, zoom REAL NOT NULL DEFAULT 1," +
                 " CHECK(revision>=0 AND ceiling>=0 AND count>=0 AND head>=0 AND tail>=0))");
         db.execSQL("CREATE TABLE catalog(singleton INTEGER PRIMARY KEY CHECK(singleton=1)," +
@@ -118,6 +118,7 @@ public final class DocumentDatabase implements Closeable {
 
     private void checkThread() {
         if (Thread.currentThread()!=owner) throw new IllegalStateException("Not storage worker");
+        if (db.inTransaction()) throw new IllegalStateException("Reentrant catalog operation");
     }
 
     public UUID createDocument() {
@@ -160,6 +161,16 @@ public final class DocumentDatabase implements Closeable {
         String s=scalar(db,"SELECT current FROM catalog WHERE singleton=1");
         return s==null?null:UUID.fromString(s);
     }
+    public UUID next(UUID after) {
+        checkThread();
+        String key=after==null?"":after.toString();
+        try(Cursor c=db.rawQuery("SELECT uuid FROM document WHERE uuid>? ORDER BY uuid LIMIT 1",new String[]{key})) {
+            if(c.moveToFirst()) return UUID.fromString(c.getString(0));
+        }
+        try(Cursor c=db.rawQuery("SELECT uuid FROM document ORDER BY uuid LIMIT 1",null)) {
+            return c.moveToFirst()?UUID.fromString(c.getString(0)):null;
+        }
+    }
 
     public static final class View {
         public final long seq;
@@ -187,34 +198,66 @@ public final class DocumentDatabase implements Closeable {
         private SQLiteDatabase transaction;
         private final String key;
         private final long revision;
-        private Writer(SQLiteDatabase tx,String key,long revision) {
+        private long head,tail,count,ceiling;
+        private boolean failed;
+        private Writer(SQLiteDatabase tx,String key,long revision,long head,long tail,long count,long ceiling) {
             transaction=tx; this.key=key; this.revision=revision;
+            this.head=head; this.tail=tail; this.count=count; this.ceiling=ceiling;
         }
         private SQLiteDatabase tx() {
-            if (transaction==null || !transaction.inTransaction())
+            if (transaction==null || !transaction.inTransaction() || failed)
                 throw new IllegalStateException("Writer used outside its transaction");
             return transaction;
         }
         public void remove(long id) {
-            if(tx().delete("stroke","doc=? AND id=?",new String[]{key,Long.toString(id)})!=1)
-                throw new SQLiteException("Missing stroke to delete");
+            SQLiteDatabase db=tx();
+            failed=true;
+            long[] links=links(db,id);
+            if(db.delete("stroke","doc=? AND id=?",new String[]{key,Long.toString(id)})!=1)
+                throw new SQLiteException("Missing stroke");
+            if(links[0]==0) head=links[1]; else setLink(db,links[0],true,links[1]);
+            if(links[1]==0) tail=links[0]; else setLink(db,links[1],false,links[0]);
+            --count;
+            failed=false;
+        }
+        public void removeIfPresent(long id) {
+            SQLiteDatabase db=tx();
+            try(Cursor c=db.rawQuery("SELECT 1 FROM stroke WHERE doc=? AND id=?",new String[]{key,Long.toString(id)})) {
+                if(c.moveToFirst()) remove(id);
+            }
+        }
+        public void insertAfter(long id,long prev,byte[] header,int count,ChunkSource source) {
+            insert(id,prev,prev==0?head:links(tx(),prev)[1],header,count,source);
         }
         public void clear() {
-            tx().delete("stroke","doc=?",new String[]{key});
+            SQLiteDatabase db=tx(); failed=true;
+            db.delete("stroke","doc=?",new String[]{key});
+            head=tail=count=0; failed=false;
         }
-        public void link(long id,long prev,long next) {
-            try (SQLiteStatement s=tx().compileStatement("UPDATE stroke SET prev=?,next=? WHERE doc=? AND id=?")) {
-                s.bindLong(1,prev); s.bindLong(2,next); s.bindString(3,key); s.bindLong(4,id);
+        private long[] links(SQLiteDatabase db,long id) {
+            try(Cursor c=db.rawQuery("SELECT prev,next FROM stroke WHERE doc=? AND id=?",
+                    new String[]{key,Long.toString(id)})) {
+                if(!c.moveToFirst()) throw new SQLiteException("Missing order neighbor");
+                return new long[]{c.getLong(0),c.getLong(1)};
+            }
+        }
+        private void setLink(SQLiteDatabase db,long id,boolean forward,long value) {
+            try (SQLiteStatement s=db.compileStatement("UPDATE stroke SET "+(forward?"next":"prev")+"=? WHERE doc=? AND id=?")) {
+                s.bindLong(1,value); s.bindString(2,key); s.bindLong(3,id);
                 if(s.executeUpdateDelete()!=1) throw new SQLiteException("Missing stroke to relink");
             }
         }
         public void insert(long id,long prev,long next,byte[] header,int count,ChunkSource source) {
-            if(header.length!=80 || count<=0 || count>1000000) throw new IllegalArgumentException("Invalid record");
+            SQLiteDatabase db=tx(); failed=true;
+            if(header.length!=80 || count<=0 || count>1000000 || id<=0 || id>ceiling)
+                throw new IllegalArgumentException("Invalid record");
+            if((prev==0?head:links(db,prev)[1])!=next || (next==0?tail:links(db,next)[0])!=prev)
+                throw new SQLiteException("Invalid insertion slot");
             MessageDigest hash=sha();
             hash.update(header);
-            tx().execSQL("INSERT INTO stroke VALUES(?,?,?,?,?,?,?,?,zeroblob(32))",
+            db.execSQL("INSERT INTO stroke VALUES(?,?,?,?,?,?,?,?,zeroblob(32))",
                     new Object[]{key,id,prev,next,revision,revision,header,count});
-            try(SQLiteStatement s=tx().compileStatement("INSERT INTO chunk VALUES(?,?,?,?)")) {
+            try(SQLiteStatement s=db.compileStatement("INSERT INTO chunk VALUES(?,?,?,?)")) {
                 s.bindString(1,key); s.bindLong(2,id);
                 int remaining=count*36;
                 for(int i=0;remaining>0;i++) {
@@ -224,7 +267,10 @@ public final class DocumentDatabase implements Closeable {
                     hash.update(b); remaining-=b.length;
                 }
             }
-            tx().execSQL("UPDATE stroke SET digest=? WHERE doc=? AND id=?",new Object[]{hash.digest(),key,id});
+            db.execSQL("UPDATE stroke SET digest=? WHERE doc=? AND id=?",new Object[]{hash.digest(),key,id});
+            if(prev==0) head=id; else setLink(db,prev,true,id);
+            if(next==0) tail=id; else setLink(db,next,false,id);
+            this.count++; failed=false;
         }
     }
 
@@ -235,22 +281,33 @@ public final class DocumentDatabase implements Closeable {
 
     /** Returns only after complete group commit. A thrown exception never authorizes a durable ack. */
     public void commit(UUID id,long base,long head,long tail,long count,Changes changes) {
+        commit(id,UUID.randomUUID(),base,head,tail,count,changes);
+    }
+    public void commit(UUID id,UUID token,long base,long head,long tail,long count,Changes changes) {
         checkThread();
         if(base<0 || base==Long.MAX_VALUE || count<0 ||
                 (count==0 ? head!=0 || tail!=0 : head<=0 || tail<=0))
             throw new IllegalArgumentException("Invalid document change");
         String key=id.toString();
         db.beginTransactionNonExclusive();
-        Writer w=new Writer(db,key,base+1);
-        try(SQLiteStatement s=db.compileStatement("UPDATE document SET revision=?,head=?,tail=?,count=?" +
+        Writer w=null;
+        try(Cursor c=db.rawQuery("SELECT head,tail,count,ceiling,revision,last_token FROM document WHERE uuid=?",new String[]{key});
+            SQLiteStatement s=db.compileStatement("UPDATE document SET revision=?,head=?,tail=?,count=?,last_token=?" +
                 " WHERE uuid=? AND revision=? AND ceiling>=?")) {
+            if(!c.moveToFirst()) throw new SQLiteException("Missing document");
+            if(c.getLong(4)==base+1 && token.toString().equals(c.getString(5))) {
+                db.setTransactionSuccessful(); return;
+            }
+            w=new Writer(db,key,base+1,c.getLong(0),c.getLong(1),c.getLong(2),c.getLong(3));
             s.bindLong(1,base+1); s.bindLong(2,head); s.bindLong(3,tail); s.bindLong(4,count);
-            s.bindString(5,key); s.bindLong(6,base); s.bindLong(7,Math.max(head,tail));
+            s.bindString(5,token.toString()); s.bindString(6,key); s.bindLong(7,base); s.bindLong(8,Math.max(head,tail));
             if(s.executeUpdateDelete()!=1) throw new SQLiteException("Document revision/identity conflict");
             changes.write(w);
+            if(w.failed || w.head!=head || w.tail!=tail || w.count!=count)
+                throw new SQLiteException("Incomplete document change");
             db.setTransactionSuccessful();
         } finally {
-            w.transaction=null;
+            if(w!=null) w.transaction=null;
             db.endTransaction();
         }
     }

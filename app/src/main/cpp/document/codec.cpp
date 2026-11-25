@@ -34,6 +34,12 @@ input::RawInputPoint point(const uint8_t*& p) noexcept {
     return {{take<double>(p),take<double>(p)},take<double>(p),take<float>(p),take<float>(p),take<float>(p)};
 }
 }
+bool validInk(const Ink& ink) noexcept {
+    if(!valid(ink.brush,0,0) || ink.samples.empty() || ink.samples.size()>1000000) return false;
+    double prev=-1;
+    for(const auto& p:ink.samples) { if(!valid(p,prev)) return false; prev=p.timestamp; }
+    return true;
+}
 bool header(const Brush& b,double dx,double dy,Header& out) noexcept {
     if(!valid(b,dx,dy)) return false;
     auto p=out.data();
