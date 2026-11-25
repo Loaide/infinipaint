@@ -3,7 +3,9 @@
 #include <cstdint>
 #include <vector>
 namespace engine::input {
-// Coordinates are view-local pixels (not world or display coordinates). Timestamps are monotonic seconds.
+// Position and velocity use the caller's coordinate space consistently for a stroke.
+// The tablet bridge maps view pixels to world units before processing; view-local
+// replay callers can instead use pixels. Timestamps are monotonic seconds (ties allowed).
 // One processor instance owns one active pointer/stroke; routing pointer IDs is the caller's job.
 struct RawInputPoint {
     core::Vec2 position;

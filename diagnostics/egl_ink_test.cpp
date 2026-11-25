@@ -5,6 +5,10 @@
 #include <GLES2/gl2.h>
 #include <android/log.h>
 #include <jni.h>
+#include <array>
+#ifdef IP_REPLAY_TEST
+extern "C" bool ipTestCodecReplay();
+#endif
 
 #include <algorithm>
 #include <array>
@@ -404,6 +408,19 @@ int main() {
     testDwell(background);
     measureJoinAA();
     comparePortableRamp();
+#ifdef IP_REPLAY_TEST
+    clear();
+    begin(12);
+    sample(12,16,40,1,.4f);
+    sample(12,16,40,1,.8f);
+    sample(12,76,20,1,.2f);
+    sample(12,82,60,1.01,.9f);
+    end(12);
+    const std::array<Frame,4> before{render(0),render(1),render(2),render(3)};
+    check(ipTestCodecReplay(),"reconstructed vertex streams differ");
+    for(int i=0;i<4;i++) check(render(i)==before[i],"canonical replay pixels differ");
+    std::puts("PASS: v1 codec and reconstruction vertex bytes + 4-mode RGBA parity");
+#endif
     clear();
     check(render(composite) == blank, "JNI clear left ink in the framebuffer");
     std::puts("PASS: production GLES2 shader, pressure dots/taper, pen-up, and completed order");

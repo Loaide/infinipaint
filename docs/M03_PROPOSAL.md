@@ -1,6 +1,14 @@
-# ADR-013 proposal: document edits and durable revisions
+# ADR-013 (approved): document edits and durable revisions
 
-**Awaiting owner approval.** This is a logical design and acceptance baseline, not a frozen wire format or DDL. Applies on `feature/m03-document-engine` from `8b5c24dbafbfbb78123c22ab819cd581897a2245`. Keeps ADR-003/004/008/010/012; no change to ADR-002/006. No production spatial index, renderer migration or persistent undo.
+**Approved** by the owner at proposal `1b71523179ce6c66b619f07dae1ea80e5755955e`, with the following binding additions to the design and its acceptance matrix. Keeps ADR-003/004/008/010/012; no change to ADR-002/006.
+
+|Contract addition|Acceptance requirement (in addition to matrix below)|
+|---|---|
+|Order ranks are derived from persisted links and revisioned splices. M04 rank service accepts document/session/revision and a span of candidate IDs; returns those IDs in paint order or stale/missing, never an approximate result.|Compare sparse queries against traversal oracle after inserts, deletes, splits and undo. Instrument work: no full traversal per query; O(k log k log N) or better after index initialization, no new persistent fields.|
+|Reserve ID, command, save slot and byte credits before begin; grow credits before sample acceptance. Limit failure must be reported, preserve accepted prefix, allow retry/end or explicit cancel. Persistent write failure keeps queued work and status, rejects new admission rather than dropping accepted ink.|Inject exhaustion before begin, during growth and retry at pen-up. Verify prefix unchanged, status visible, no disk on stylus thread.|
+|History belongs to open document session, not Activity, EGL or writer. Keep through pause/rotation/context recreation. Explicit successful switch/close ends outgoing history after flush; unsuccessful switch retains it. 128 groups/64 MiB initially configurable.|Exercise each lifecycle transition, failed/successful switch, and oversized Clear (explain, no mutation). M04 needs undoable bulk operations beyond resident history, without changing IDs/links.|
+|View pan X/Y and zoom are separate validated per-document metadata. Coalesce latest value by session on navigation end/idle, flush on explicit save/switch. Independent sequence guards stale writes; never increment edit revision or history.|Rapid camera updates, switch/reopen two distinct views; check bounded write count, no stale overwrite or edit ordering effect.|
+|One resident admission ledger covers canonical, history, queued and in-flight saves, live CPU/GPU geometry, scratch/rebuild and simultaneous old/new document state. Charge retained capacities conservatively, fail before allocation; reserve headroom for driver/runtime. Measure high water by category including switch/restore; select caps from actual physical-memory evidence, not RAM Plus.|Exercise simultaneous load/save/reconstruction and active input at limit. Reject or defer without publishing partial state; document named hardware, RSS/allocator measurements, charges vs real peaks and justified limits before acceptance.|
 
 ## What is authoritative?
 

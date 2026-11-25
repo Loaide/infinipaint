@@ -19,6 +19,11 @@
 #include <vector>
 
 #include "input/input_processor.hpp"
+#include "document/document.hpp"
+#ifdef IP_REPLAY_TEST
+#include "document/codec.hpp"
+#include <cstring>
+#endif
 #include "stroke/spline.hpp"
 
 namespace {
@@ -52,10 +57,7 @@ namespace {
             }
         }
     };
-    struct CompletedInk {
-        input::RawInputStroke raw;
-        input::OneEuroParams filter;
-        float radiusWorld=0;
+    struct CompletedGeometry {
         std::array<Mesh,3> derived;
     };
 
@@ -69,7 +71,8 @@ namespace {
         Mesh stableMesh;
         Mesh tailMesh;
         Bounds bounds;
-        std::shared_ptr<CompletedInk> completion=std::make_shared<CompletedInk>();
+        document::Brush brush;
+        std::shared_ptr<CompletedGeometry> completion=std::make_shared<CompletedGeometry>();
         uint64_t tailRevision = 0;
 
         std::vector<float> rawPoints;
@@ -135,7 +138,7 @@ namespace {
     std::unordered_map<int, std::unique_ptr<Trace>> live;
 
     struct FinishedTrace {
-        std::shared_ptr<const input::RawInputStroke> originalRaw;
+        std::shared_ptr<const document::Ink> record;
         std::shared_ptr<const Mesh> raw;
         std::shared_ptr<const Mesh> clean;
         std::shared_ptr<const Mesh> spline;
@@ -769,7 +772,7 @@ Java_com_infinipaint_demo_NativeBridge_begin(
         JNIEnv*,
         jclass,
         jint id,
-        jint
+        jint tool
 ) {
 
     std::lock_guard<std::mutex> guard(stateMutex);
@@ -785,8 +788,7 @@ Java_com_infinipaint_demo_NativeBridge_begin(
     auto inputProcessor =
             input::InputProcessor::create(params);
 
-    auto fitter =
-            stroke::SplineFitter::create();
+    auto fitter = stroke::SplineFitter::create({stroke::Parameterization::Centripetal,1000000,.01,14});
 
     if (!inputProcessor || !fitter) {
         return JNI_FALSE;
@@ -795,8 +797,9 @@ Java_com_infinipaint_demo_NativeBridge_begin(
     try {
         auto trace=std::make_unique<Trace>(std::move(inputProcessor.value()),std::move(fitter.value()));
         trace->strokeRadiusWorld = (float)(1.9 / cameraZoom);
-        trace->completion->filter=params;
-        trace->completion->radiusWorld=trace->strokeRadiusWorld;
+        trace->brush.filter=params;
+        trace->brush.radiusWorld=trace->strokeRadiusWorld;
+        trace->brush.tool=static_cast<uint32_t>(tool);
         if (!trace->input.begin_stroke()) return JNI_FALSE;
         trace->gpuId = nextLiveGpuId++;
         live[id] = std::move(trace);
@@ -807,6 +810,8 @@ Java_com_infinipaint_demo_NativeBridge_begin(
 // --------------------------------------------------
 // Receive input sample
 // --------------------------------------------------
+
+static bool appendV1(Trace&,const input::RawInputPoint&,double,int64_t,bool);
 
 JNIEXPORT jboolean JNICALL
 Java_com_infinipaint_demo_NativeBridge_sample(
@@ -864,7 +869,19 @@ Java_com_infinipaint_demo_NativeBridge_sample(
             tx,
             ty
     };
+    if (!appendV1(trace,point,cameraZoom,waitNs,true)) return JNI_FALSE;
+    const int64_t nowNs = profileNs();
+    newestEventNs.store(static_cast<int64_t>(time*1000000000.0),std::memory_order_relaxed);
+    latestSampleEndNs.store(nowNs,std::memory_order_relaxed);
+    sampleProcessingUs.fetch_add((nowNs-processingStartNs)/1000,std::memory_order_relaxed);
+    processedSamples.fetch_add(1,std::memory_order_relaxed);
+    return JNI_TRUE;
+}
 
+static bool appendV1(Trace& trace,const input::RawInputPoint& point,double zoom,int64_t waitNs,bool telemetry) {
+    const auto [worldX,worldY]=point.position;
+    const auto time=point.timestamp;
+    const auto pressure=point.pressure;
     const size_t oldSegments=trace.spline.segment_count();
     const int64_t filterStartNs = profileNs();
     auto clean = trace.input.process(point,&trace,prepareSample);
@@ -879,8 +896,10 @@ Java_com_infinipaint_demo_NativeBridge_sample(
         return JNI_FALSE;
     }
     trace.lastAcceptedTime = time;
-    auditMutexWaitNs.fetch_add(waitNs,std::memory_order_relaxed);
-    auditFilterNs.fetch_add(commitNs,std::memory_order_relaxed);
+    if(telemetry) {
+        auditMutexWaitNs.fetch_add(waitNs,std::memory_order_relaxed);
+        auditFilterNs.fetch_add(commitNs,std::memory_order_relaxed);
+    }
 
     // Immediate ink uses actual input positions.
 
@@ -896,7 +915,7 @@ Java_com_infinipaint_demo_NativeBridge_sample(
     auto c = clean.value();
     // Diagnostic comparison uses the genuine One-Euro output, not the old
     // directional/2px fidelity limiter that hid the difference from raw.
-    const double deviation = std::hypot(c.position.x - worldX, c.position.y - worldY) * cameraZoom;
+    const double deviation = std::hypot(c.position.x - worldX, c.position.y - worldY) * zoom;
     trace.originalDeviationMax = std::max(trace.originalDeviationMax, deviation);
     trace.filteredBeforeLimitSum += deviation;
     if (deviation > 2.0) ++trace.wouldExceedLimit;
@@ -922,24 +941,17 @@ Java_com_infinipaint_demo_NativeBridge_sample(
     trace.bounds.include(trace.stableMesh,stableStart);
     trace.bounds.include(trace.rawMesh,rawStart);
     trace.bounds.include(trace.cleanMesh,cleanStart);
-    auditSplineNs.fetch_add(profileNs() - splineStartNs, std::memory_order_relaxed);
-    auditStageSamples.fetch_add(1, std::memory_order_relaxed);
-
-    // Android MotionEvent.getEventTime() is based on uptime milliseconds.
-    // Compare against steady clock as a useful estimate, not photon latency.
-    const int64_t nowNs = profileNs();
-    const int64_t eventNs = static_cast<int64_t>(time * 1000000000.0);
-    newestEventNs.store(eventNs, std::memory_order_relaxed);
-    latestSampleEndNs.store(nowNs, std::memory_order_relaxed);
-    sampleProcessingUs.fetch_add((nowNs - processingStartNs) / 1000,
-                                 std::memory_order_relaxed);
-    processedSamples.fetch_add(1, std::memory_order_relaxed);
+    if(telemetry) {
+        auditSplineNs.fetch_add(profileNs() - splineStartNs, std::memory_order_relaxed);
+        auditStageSamples.fetch_add(1, std::memory_order_relaxed);
+    }
     return JNI_TRUE;
 }
 
 // --------------------------------------------------
 // End stroke
 // --------------------------------------------------
+static FinishedTrace finishV1(Trace&,std::shared_ptr<const document::Ink>);
 
 JNIEXPORT jboolean JNICALL
 Java_com_infinipaint_demo_NativeBridge_end(
@@ -962,9 +974,43 @@ Java_com_infinipaint_demo_NativeBridge_end(
     if(trace.input.raw_samples().empty()) return JNI_FALSE;
     // Allocate the ordered slot before touching live meshes. No render can
     // observe it until populated. Sample preflight reserved terminal geometry.
-    try { finished.emplace_back(); }
-    catch(const std::bad_alloc&) { return JNI_FALSE; }
+    std::shared_ptr<const document::Ink> record;
+    try {
+        finished.emplace_back();
+        // Allocate the immutable record before moving accepted samples. No fallible
+        // geometry operation follows this transfer (terminal capacity is reserved).
+        try {
+            // release_raw returns by value; do not call it as a make_shared argument:
+            // if allocation failed the still-live stroke would have lost its history.
+            struct CommitRecord final : document::Ink {
+                CommitRecord(input::InputProcessor& p,document::Brush b)
+                    : Ink(std::move(p).release_raw(),b) {}
+            };
+            record=std::make_shared<CommitRecord>(trace.input,trace.brush);
+        } catch (...) { finished.pop_back(); throw; }
+    } catch(const std::bad_alloc&) { return JNI_FALSE; }
 
+    finished.back()=finishV1(trace,std::move(record));
+    const auto ink=trace.completion;
+    const size_t rawSamples=trace.rawPoints.size()/2, cleanSamples=trace.cleanPoints.size()/2;
+    auto retired=std::move(it->second);
+    live.erase(it);
+    const auto held=profileNs()-lockStart;
+    guard.unlock();
+    __android_log_print(ANDROID_LOG_INFO, "IP_GEOMETRY",
+        "raw_samples=%zu filtered_samples=%zu raw_vertices=%zu filtered_vertices=%zu spline_vertices=%zu mean_filter_deviation_px=%.4f max_filter_deviation_px=%.4f",
+        rawSamples, cleanSamples, ink->derived[0].size(), ink->derived[1].size(),
+        ink->derived[2].size(), trace.deviationSum/trace.deviationCount,trace.deviationMax);
+    __android_log_print(ANDROID_LOG_INFO,"IP90_FIDELITY",
+        "samples=%zu mean_deviation_px=%.3f max_deviation_px=%.3f would_exceed_2px=%zu zoom=%.3f",
+        trace.deviationCount,trace.deviationSum/trace.deviationCount,trace.deviationMax,
+        trace.wouldExceedLimit,1.9/trace.strokeRadiusWorld);
+    __android_log_print(ANDROID_LOG_INFO,"IP_PEN_UP","samples=%zu lock_ns=%lld wait_ns=%lld",
+                        rawSamples,(long long)held,(long long)(lockStart-enter));
+    return JNI_TRUE;
+}
+
+static FinishedTrace finishV1(Trace& trace,std::shared_ptr<const document::Ink> record) {
     auto& splineMesh=trace.stableMesh;
     splineMesh.insert(splineMesh.end(),trace.tailMesh.begin(),trace.tailMesh.end());
     const auto rawStart=trace.rawMesh.size(),cleanStart=trace.cleanMesh.size(),splineStart=splineMesh.size();
@@ -982,33 +1028,61 @@ Java_com_infinipaint_demo_NativeBridge_end(
         for(auto* mesh:{&trace.rawMesh,&trace.cleanMesh,&splineMesh})
             quad(*mesh,rx,ry,rx,ry,trace.rawPeak);
     }
-    const size_t rawSamples = trace.rawPoints.size() / 2;
-    const size_t cleanSamples = trace.cleanPoints.size() / 2;
     trace.bounds.include(trace.rawMesh,rawStart);
     trace.bounds.include(trace.cleanMesh,cleanStart);
     trace.bounds.include(splineMesh,splineStart);
-    auto ink=std::move(trace.completion);
-    ink->raw=std::move(trace.input).release_raw();
+    auto ink=trace.completion;
     ink->derived={std::move(trace.rawMesh),std::move(trace.cleanMesh),std::move(splineMesh)};
     const auto& b=trace.bounds;
-    finished.back()={{ink,&ink->raw},{ink,&ink->derived[0]},{ink,&ink->derived[1]},
+    return {std::move(record),{ink,&ink->derived[0]},{ink,&ink->derived[1]},
                      {ink,&ink->derived[2]},b.minX,b.minY,b.maxX,b.maxY,trace.gpuId};
-    auto retired=std::move(it->second); // release mutable histories outside lock
-    live.erase(it);
-    const auto held=profileNs()-lockStart;
-    guard.unlock();
-    __android_log_print(ANDROID_LOG_INFO, "IP_GEOMETRY",
-        "raw_samples=%zu filtered_samples=%zu raw_vertices=%zu filtered_vertices=%zu spline_vertices=%zu mean_filter_deviation_px=%.4f max_filter_deviation_px=%.4f",
-        rawSamples, cleanSamples, ink->derived[0].size(), ink->derived[1].size(),
-        ink->derived[2].size(), trace.deviationSum/trace.deviationCount,trace.deviationMax);
-    __android_log_print(ANDROID_LOG_INFO,"IP90_FIDELITY",
-        "samples=%zu mean_deviation_px=%.3f max_deviation_px=%.3f would_exceed_2px=%zu zoom=%.3f",
-        trace.deviationCount,trace.deviationSum/trace.deviationCount,trace.deviationMax,
-        trace.wouldExceedLimit,1.9/trace.strokeRadiusWorld);
-    __android_log_print(ANDROID_LOG_INFO,"IP_PEN_UP","samples=%zu lock_ns=%lld wait_ns=%lld",
-                        rawSamples,(long long)held,(long long)(lockStart-enter));
-    return JNI_TRUE;
 }
+
+[[maybe_unused]] static bool reconstructV1(const std::shared_ptr<const document::Ink>& record,FinishedTrace& out) {
+    if(!record || record->brush.recipe!=1 || record->samples.empty()) return false;
+    auto p=input::InputProcessor::create(record->brush.filter);
+    auto f=stroke::SplineFitter::create({stroke::Parameterization::Centripetal,1000000,.01,14});
+    if(!p || !f) return false;
+    Trace scratch(std::move(p).value(),std::move(f).value());
+    scratch.strokeRadiusWorld=record->brush.radiusWorld;
+    if(!scratch.input.begin_stroke()) return false;
+    for(const auto& s:record->samples)
+        if(!appendV1(scratch,s,1,0,false)) return false;
+    out=finishV1(scratch,record);
+    return true;
+}
+
+#ifdef IP_REPLAY_TEST
+// Single-threaded Mesa harness only. Cross the codec boundary, throw away old
+// derived meshes and require byte-identical vertex streams before pixel readback.
+bool ipTestCodecReplay() {
+    for(auto& old:finished) {
+        using namespace document::wire;
+        const auto& src=*old.record;
+        Header h;
+        document::Brush b;
+        double x,y;
+        if(!header(src.brush,0,0,h) || !readHeader(h,b,x,y)) return false;
+        input::RawInputStroke restored(src.samples.size());
+        for(size_t i=0;i<restored.size();) {
+            size_t n=std::min(chunkSamples,restored.size()-i);
+            std::vector<uint8_t> bytes(n*sampleBytes);
+            if(!samples(std::span(src.samples).subspan(i,n),bytes) ||
+               !readSamples(bytes,i?restored[i-1].timestamp:-1,std::span(restored).subspan(i,n))) return false;
+            i+=n;
+        }
+        FinishedTrace replay;
+        if(!reconstructV1(std::make_shared<const document::Ink>(std::move(restored),b),replay)) return false;
+        auto equal=[](const auto& a,const auto& b){
+            return a->size()==b->size() && (a->empty() || !std::memcmp(a->data(),b->data(),a->size()*sizeof(Vertex)));
+        };
+        if(!equal(old.raw,replay.raw)||!equal(old.clean,replay.clean)||!equal(old.spline,replay.spline)) return false;
+        old=std::move(replay);
+    }
+    ++finishedEpoch;
+    return !finished.empty();
+}
+#endif
 
 // --------------------------------------------------
 // Cancel stroke
