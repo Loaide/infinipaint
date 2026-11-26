@@ -1,4 +1,24 @@
-# M03 — physical campaign complete; written acceptance pending
+# M03 accepted — handoff to M04
+
+M03 engineering closure and written owner acceptance are complete.
+
+Tested application:
+d543ed4a0ab4dd0e760ae4ebdb5a616043f88a8f
+
+See [formal acceptance](../reports/M03_ACCEPTED.md) and
+[engineering closure](../reports/M03_ACCEPTANCE.md).
+
+Do not repeat M03 testing without a specific defect or evidence
+that invalidates an existing result.
+
+Next milestone: M04 scalability architecture and implementation
+under its own approval and verification gates.
+
+---
+
+## Preserved historical record
+
+### M03 — physical campaign complete; written acceptance pending
 
 Closure checkpoint: owner tested the isolated app on SM-X626B. On `feature/m03-document-engine`, inspected HEAD `cb814c49e583c32a96c8481f95a616c9564ad06f` descends from the tested `d543ed4a0ab4dd0e760ae4ebdb5a616043f88a8f`; intervening changes were documentation only. Local archive `captures/m03-owner-gate-d543ed4.zip` and [SHA-256 inventory](../reports/M03_EVIDENCE_SHA256.txt) preserve the raw windows, device preflight, Android tests, APKs, host timing and Comprehensive output. Nothing installed or changed on the tablet during reconciliation. No repeat of the physical campaign. Next: owner disposition of the limitations in the acceptance report, not merge or M04.
 

@@ -1,4 +1,20 @@
-# Current state — M03 implementation, not accepted
+# Current project state — M03 accepted
+
+- M00, M00.5, M01 and M02: accepted.
+- M03: formally accepted with documented limitations.
+- M04: next milestone; implementation not started.
+- M05, M06 and M07: upcoming.
+
+See [M03 formal acceptance](../reports/M03_ACCEPTED.md).
+
+The immediate next engineering milestone is M04 architecture
+and scalability planning. No new architecture is approved here.
+
+---
+
+## Preserved historical record
+
+### Current state — M03 implementation, not accepted
 
 The reviewed parked-GL/scene-switch and canceled-buffer admission defect is corrected at `d543ed4a0ab4dd0e760ae4ebdb5a616043f88a8f`. Host tests cover rollback, retirement, failed upload and context loss; physical memory peaks remain unknown. See the [report](../reports/LATEST.md).
 

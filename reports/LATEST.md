@@ -1,4 +1,18 @@
-# M03 Android verification candidate — not accepted
+# M03 accepted — latest milestone status
+
+M03 is formally accepted with documented limitations.
+
+See [formal acceptance](M03_ACCEPTED.md) and
+[engineering closure](M03_ACCEPTANCE.md).
+
+The historical pending statuses below are superseded by the
+owner acceptance of 2026-11-26. Measurement limitations remain.
+
+---
+
+## Preserved historical record
+
+### M03 Android verification candidate — not accepted
 
 ## P1 correction — `d543ed4a0ab4dd0e760ae4ebdb5a616043f88a8f`
 

@@ -1,4 +1,15 @@
-# M03 engineering closure — decision requested, not accepted
+# M03 engineering closure — owner accepted
+
+Written owner acceptance was received on 2026-11-26.
+
+See [formal acceptance](M03_ACCEPTED.md).
+The engineering findings and limitations below remain unchanged.
+
+---
+
+## Preserved historical record
+
+### M03 engineering closure — decision requested, not accepted
 
 **Decision:** ready for written owner disposition of the tested APK; **not an unconditional pass of every matrix item**. Drawing, durable recovery, ordinary editing, isolated Android tests and warmed incremental SQL scaling passed. The measured lift regression, unsampled transition peak and coverage limits below remain on the record. No application change or tablet repeat is proposed on this evidence.
 
