@@ -1,5 +1,28 @@
 # M03 Android verification candidate — not accepted
 
+## P1 correction — `d543ed4a0ab4dd0e760ae4ebdb5a616043f88a8f`
+
+Branch `feature/m03-document-engine`, baseline `8e4948712305a1936883ea8c4124dba2362fd84f`. Inspected the four changed files: `app/src/main/cpp/{native_bridge.cpp,document/working_set.hpp}`, `diagnostics/{renderer_smoke.cpp,run_m02.sh}`. The preserved review diff passed `git apply --reverse --check` before resuming; it was not reapplied.
+
+Scene-map allocations are charged across clone, merge, swap and GL-local ownership. Snapshot growth is reserved before releasing the input lock. Upload transfers the reservation to live GL storage; failure, retirement, adoption or context loss ends that charge. Completed geometry reserves a cache-node credit held across erasure. A specialist found an early decrement during vector destruction: a base-class charge now releases **after** the derived vectors free their allocations.
+
+Independent follow-up at the tested SHA confirmed the destructor-order and cache-node finding resolved. Cache-node ordering was checked by source inspection; the allocator hook independently exercises the mesh-free boundary. No physical residency claim.
+
+`captures/m03-p1-release-owners.txt`: mock bridge and deterministic parked-GL test passed. At a 64,161,023-byte modeled slice, the second document was rejected with 64 patch nodes held; the identical switch fit after retirement. The test detected no admission headroom increase at the allocator hook immediately before the outgoing mesh free. Cancel-before-upload retained 95,544 bytes through upload and returned exactly that headroom at deletion. Failed upload, retry, cancel-after-upload, context loss without deleting stale names, and completed-cache handoff were also asserted. These are logical allocation/request charges, not RSS or driver residency. `captures/m03-p1-document.txt`: core oracle, rollback and seven allocation-failure cases passed (no core changes after that run).
+
+`captures/m03-p1-release-pixels.txt`: Mesa 26.0.3 llvmpipe GLES2, MAX and fallback both passed the reconstruction vertex/4-mode RGBA parity suite, same-branch maximum delta 0/255. Mock bridge asserted zero unrelated undo uploads. `captures/m03-p1-release-build.log`: offline isolated Gradle assemble succeeded; the app was repackaged and the unchanged instrumentation package was up to date. No fresh JVM/lint, matched latency or broad benchmark run.
+
+Both archived files were hash-checked against build outputs. `aapt` verified `com.infinipaint.demo.m03verify` (arm64-v8a, armeabi-v7a, x86, x86_64) and `com.infinipaint.demo.m03verify.test`:
+
+|Archive path|SHA-256|
+|---|---|
+|`captures/m03-d543ed4-gate/app-m03Verify.apk`|`94b45501c757b62fb91fdf42caf4130a18dfea4493fabfaf6951a214993c4f7e`|
+|`captures/m03-d543ed4-gate/app-m03Verify-androidTest.apk`|`6a7ac00ff312662579cbe5abf55634adb8f9bef5ccae9963f2134c2e31a7a87b`|
+
+No installation or device measurements. The prior latency finding, Android SQLite/recovery/scale runs, physical memory and written owner gate are unchanged. See [isolated Android procedure](../docs/M03_TABLET.md).
+
+## Previous candidate — retained evidence and open acceptance criteria
+
 Branch `feature/m03-document-engine`; see [handoff](../docs/SESSION_HANDOFF.md) for tested SHA and [approved matrix](../docs/M03_PROPOSAL.md) for unchanged criteria. No installation or physical run. Source inspection covered `document/{document,change_queue,working_set}`, `native_bridge.cpp`, `tablet/{session,store_jni}`, Java `storage/{EditorStore,StorePort,DocumentDatabase}`, host document/render tests and isolated Android fixtures. The [source map](../docs/CODE_MAP.md) and [contract](../docs/M03_CONTRACT.md) describe the integration.
 
 Tested source `d8a804a15e2e123cca26eec6ef54854e4fada3b0`. `aapt dump badging` verified target `com.infinipaint.demo.m03verify` (arm64-v8a, armeabi-v7a, x86, x86_64) and runner package `com.infinipaint.demo.m03verify.test`. SHA-256:
