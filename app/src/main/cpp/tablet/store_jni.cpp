@@ -78,13 +78,14 @@ JNIEXPORT void JNICALL STORE(endStroke)(JNIEnv* e,jclass) {
         require(candidate->restore(s->id,s->prev,std::move(v),s->content,s->geometry,revision,ceiling)==Status::Ok);
         return true;});
 }
-JNIEXPORT void JNICALL STORE(activate)(JNIEnv* e,jclass,jlong first,jlong last,jlong budget) {
+JNIEXPORT void JNICALL STORE(stage)(JNIEnv* e,jclass,jlong first,jlong last,jlong budget) {
     guarded(e,[&]{require(candidate && !incoming && candidate->size()==expected && budget>0 &&
                           uint64_t(budget)<=SIZE_MAX && candidate->finishRestore(revision,ceiling)==Status::Ok &&
                           candidate->grant(first,last));
-        require(tablet::install(std::move(candidate),size_t(budget)));return true;});
+        require(tablet::stage(std::move(candidate),size_t(budget)));return true;});
 }
-JNIEXPORT void JNICALL STORE(discard)(JNIEnv*,jclass) {incoming.reset();candidate.reset();}
+JNIEXPORT void JNICALL STORE(activate)(JNIEnv*,jclass,jdouble x,jdouble y,jdouble zoom) {tablet::activate(x,y,zoom);}
+JNIEXPORT void JNICALL STORE(discard)(JNIEnv*,jclass) {incoming.reset();candidate.reset();tablet::discard();}
 JNIEXPORT jlongArray JNICALL STORE(delta)(JNIEnv* e,jclass,jlong hi,jlong lo) {
     return guarded(e,[&]() -> jlongArray {
         saving=tablet::nextSave(); if(!saving) return nullptr;
@@ -96,13 +97,14 @@ JNIEXPORT jlongArray JNICALL STORE(delta)(JNIEnv* e,jclass,jlong hi,jlong lo) {
 JNIEXPORT jlongArray JNICALL STORE(row)(JNIEnv* e,jclass,jint index) {
     return guarded(e,[&]{require(bool(saving));
         const auto& r=saving->rows.at(index);
-        return longs(e,std::array<jlong,5>{r.id,r.prev,r.next,r.payloadChanged,
-                    r.value.ink?jlong(r.value.ink->samples.size()):0});});
+        return longs(e,std::array<jlong,6>{r.id,r.prev,r.next,r.payloadChanged,
+                    r.value.ink?jlong(r.value.ink->samples.size()):0,r.geometry});});
 }
 JNIEXPORT jbyteArray JNICALL STORE(header)(JNIEnv* e,jclass,jint index) {
     return guarded(e,[&]{require(bool(saving));
         const auto& v=saving->rows.at(index).value;
-        wire::Header h;require(v.ink && wire::header(v.ink->brush,v.dx,v.dy,h));return bytes(e,h);});
+        require(bool(v.ink));auto brush=v.ink->brush;brush.rgba=v.rgba();
+        wire::Header h;require(wire::header(brush,v.dx,v.dy,h));return bytes(e,h);});
 }
 JNIEXPORT jbyteArray JNICALL STORE(data)(JNIEnv* e,jclass,jint index,jint chunk) {
     return guarded(e,[&]{require(saving && chunk>=0 && chunk<550);

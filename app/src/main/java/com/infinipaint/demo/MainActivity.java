@@ -29,7 +29,8 @@ public final class MainActivity extends Activity implements EditorStore.Listener
     private static int retryEndId=-1; // process-session pending commit survives Activity recreation
     private final double[] erasePath=new double[8192];
     private int eraseCount;
-    @Override public void changed() {updateStatus();requestCanvasRender(FrameTelemetry.Reason.OTHER);}
+    @Override public void changed() {updateStatus();}
+    @Override public void redraw() {requestCanvasRender(FrameTelemetry.Reason.OTHER);}
     @Override public void restore(double x,double y,double zoom) {camera.restore(x,y,zoom);updateCamera();}
     private void notice(String msg) {android.widget.Toast.makeText(this,msg,android.widget.Toast.LENGTH_LONG).show();}
 
@@ -88,6 +89,13 @@ public final class MainActivity extends Activity implements EditorStore.Listener
 
     @Override
     public void dump(String prefix, FileDescriptor fd, PrintWriter out, String[] args) {
+        if(args!=null && args.length==1 && "ip-document".equals(args[0])) {
+            out.println(prefix+(documents==null?"Not open":documents.status()));
+            out.println(prefix+"bytes [uniqueInk,canonicalCharge,retainedMeshes,active,penUpScratchPeak,gpuVbo,"+
+                    "gpuVboPeak,historyCharge,saveCharge,savePeak,restoreObservedPeak,uploadScratchPeak,pendingIds] "+
+                    java.util.Arrays.toString(NativeBridge.memory()));
+            return;
+        }
         boolean mark = args != null && args.length == 1 && "ip-frames-mark".equals(args[0]);
         if (!mark && (args == null || args.length != 1 || !"ip-frames".equals(args[0]))) {
             super.dump(prefix, fd, out, args);
@@ -351,8 +359,8 @@ public final class MainActivity extends Activity implements EditorStore.Listener
                 .setPositiveButton("Retry",(d,w)->{
                     if(NativeBridge.end(retryEndId)) {retryEndId=-1; documents.save();}
                     else notice("Still pending. Tap with the pen to retry.");
-                    changed();
-                }).setNegativeButton("Discard prefix",(d,w)->{NativeBridge.cancel(retryEndId);retryEndId=-1;changed();}).show();
+                    changed();redraw();
+                }).setNegativeButton("Discard prefix",(d,w)->{NativeBridge.cancel(retryEndId);retryEndId=-1;changed();redraw();}).show();
     }
     private void editMenu() {
         if(retryEndId>=0) {recoverPrefix();return;}
@@ -361,7 +369,7 @@ public final class MainActivity extends Activity implements EditorStore.Listener
         new AlertDialog.Builder(this).setTitle("Document").setItems(options,(d,i)->{
             if(i<2) documents.command(i+1,null,0);
             if(i==2) {eraseMode=!eraseMode;notice(eraseMode?"Whole-stroke eraser":"Pen");}
-            if(i==3) {documents.flushView();documents.save();}
+            if(i==3) documents.flush();
             if(i>=4) documents.open(i==4,i==5);
         }).show();
     }
@@ -409,6 +417,7 @@ public final class MainActivity extends Activity implements EditorStore.Listener
     // --------------------------------------------
 
     private boolean handleTouch(MotionEvent e) {
+        if(documents==null || !documents.acceptsInput()) return true;
         int action = e.getActionMasked();
         int index = e.getActionIndex();
 

@@ -190,6 +190,37 @@ public final class DocumentDatabaseTest {
                 });
     }
 
+    @Test public void unknownVersionAndLogicalCorruptionDoNotBecomeEmptyDocuments() throws IOException {
+        UUID id;
+        try(DocumentDatabase db=DocumentDatabase.open(catalog,true)) {
+            id=db.createDocument();db.reserve(id,1);db.select(id);
+            db.commit(id,0,1,1,1,w->w.insert(1,0,0,new byte[80],1,i->new byte[36]));
+        }
+        for(String damage:new String[]{"UPDATE stroke SET digest=zeroblob(32)","UPDATE stroke SET next=id",
+                "DELETE FROM chunk","UPDATE document SET count=9223372036854775807"}) {
+            File copy=Files.copy(catalog.toPath(),directory.resolve("mutant.db")).toFile();
+            try(SQLiteDatabase db=SQLiteDatabase.openDatabase(copy.getPath(),null,SQLiteDatabase.OPEN_READWRITE)) {
+                db.execSQL(damage);
+            }
+            try(DocumentDatabase db=DocumentDatabase.open(copy,false)) {
+                assertThrows(SQLiteException.class,()->db.load(id,20,1024,new DocumentDatabase.Restore() {
+                    public void begin(UUID doc,long r,long ceiling,long count){}
+                    public void stroke(long i,long p,long n,long cr,long gr,int samples,byte[] h){}
+                    public void chunk(byte[] b){}
+                    public void endStroke(){}
+                }));
+                assertEquals(id,db.selected());
+            }
+            Files.delete(copy.toPath());
+        }
+        try(SQLiteDatabase db=SQLiteDatabase.openDatabase(catalog.getPath(),null,SQLiteDatabase.OPEN_READWRITE)) {
+            db.setVersion(700);
+        }
+        byte[] untouched=Files.readAllBytes(catalog.toPath());
+        assertOpenRejected(catalog,false);
+        assertArrayEquals(untouched,Files.readAllBytes(catalog.toPath()));
+    }
+
     private static Path sidecar(File path, String suffix) {
         return new File(path.getPath() + suffix).toPath();
     }

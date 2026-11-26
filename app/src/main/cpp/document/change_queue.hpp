@@ -8,6 +8,7 @@ struct ChangedRow {
     // Absent rows are deleted. Neighbors without a content change only relink.
     bool present, payloadChanged;
     Value value;
+    Revision geometry=0;
 };
 struct ChangeSet {
     Uuid document;
@@ -25,7 +26,7 @@ public:
     explicit ChangeQueue(size_t bytes=64u<<20):limit_(bytes) {}
     bool admitStroke() noexcept;
     bool growStroke(size_t canonicalCapacityBytes) noexcept;
-    void cancelStroke() noexcept { reservation_=0; }
+    void cancelStroke() noexcept { reservation_=0; strokeEnvelope_.reset(); }
     // Enable ONLY around the admitted stroke's commit, not an unrelated edit.
     void committingStroke(bool value) noexcept { committing_=value; }
     Status prepare(const Document&,std::span<const Touched>) override;
@@ -38,5 +39,6 @@ private:
     std::array<std::shared_ptr<const ChangeSet>,slots> queue_{};
     size_t head_=0,count_=0,charged_=0,reservation_=0,limit_;
     bool committing_=false;
+    std::shared_ptr<ChangeSet> strokeEnvelope_;
 };
 }

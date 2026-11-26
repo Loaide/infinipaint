@@ -1,7 +1,18 @@
-# M03 engineering report — architecture decision pending
+# M03 — integrated implementation, acceptance on hold
 
-`feature/m03-document-engine`, baseline `8b5c24dbafbfbb78123c22ab819cd581897a2245`. No changes to the tested M02 application or harness. M03 is not implemented, tested or accepted.
+Recovery baseline: `feature/m03-document-engine`, `e7f0fe3b761502c5fbe24bb43b35fb0ea7cd1237`. ADR-013 and all six clarifications approved. Java controls, JNI bridge, C++ document/edit/queue/codec, Android SQLite adapter, catalog worker and sparse GL publication exist **in the application**. This does not establish durability or device performance. [Full requirements and thresholds](../docs/M03_PROPOSAL.md).
 
-[Inspection, backend comparison, proposed contracts and pre-implementation acceptance matrix](../docs/M03_PROPOSAL.md). Local evidence at this gate: engineering State, Git ancestry/path comparison and SHA-256 of preserved accepted APK. No fresh benchmarks, build or tablet measurements. The [accepted M02 report](M02_ACCEPTED.md) is archived unchanged.
+## Recovery and evidence ledger
 
-Next: owner approval or amendment of proposed ADR-013.
+Inspected `app/src/main/cpp/native_bridge.cpp`, `tablet/{session.hpp,store_jni.cpp}`, Java `demo/MainActivity.java`, `storage/{EditorStore,StorePort}.java` and their worktree diff; exact expected branch, SHA, six unstaged files, no staged files and two known untracked captures at recovery. Original integration diff and foundation diff remain in `captures/`. Reviewed the previous specialist responses; not fresh reviews.
+
+|Gate|State at recovery|Evidence or outstanding requirement|
+|---|---|---|
+|Architecture, identity, ordering, editing core|Partial verification|Approved ADR-013. `captures/m03-core-scale.txt`: codec, reversible splices, ranges, seeded 10,000-step oracle and queue saturation/retry passed. C++ ordered fixture authored/run by lead, not by QA. Allocation-failure, budget and integrated lifecycle cases incomplete.|
+|Renderer and reconstruction|Partial verification|`captures/m03-replay-m02.txt`, `m03-scene-m02.txt`: previous matched Mesa canonical replay vertex bytes and RGBA in four modes/both coverage paths. Not a DB round trip. Rerun affected coverage, switch, context and edit fixtures after correction.|
+|SQLite correctness and interruption|Pending device execution|QA authored isolated catalog tests; Android test APK built, not run. Storage review identified reentrant transaction, invalid relinking, observer rollback and unencodable input. Integration changed to checked splices, transactional writer, reentry guard, rollback and validated ink. Need actual framework commit/load, corrupt input, retry and kill-boundary evidence.|
+|Editing/session/GL integration|Failed review gate|Graphics found failed select could target wrong document, cross-switch erasing, nonzero translations lost, admissible ink too large to reopen, event-density-dependent erase. Recovery diff stages candidate before selection, atomically activates view and scene, gates input and applies saved transforms/color. Verification pending.|
+|Working-set limits, queues, performance|Failed review gate|Performance found load-only limits, full rebuild copy under mutex, map lookup per painted/cull candidate, unbounded pending publication and view-write backlog, no ID refill. Previous host mock 4096-sample p50/p95 end 6.5/21.1 → 14.8/82.5 µs (not saving-enabled/device). Investigate against original thresholds.|
+|Document scaling|Host probe passed; investigation pending|`captures/m03-core-scale.txt`: WSL i5-6300U, 1k/10k/100k/1M distinct one-sample records, seed 13792, no observer, SQLite or GL. 1M append p50/p95/p99/max 1.0/1.6/5.0/143566.068 µs. Process peak 293304 KiB, history charge 61440 B, exit 0. 1k→100k median lookup 100→900 ns. Capture contains no phase, CPU time or scheduler attribution for the historical maximum.|
+|Integration build|Previous checkpoint only|`captures/workflow/20261125-143703-832-14880/gradle.log`: Comprehensive, JVM 11/11, lint 0 errors/13 warnings; previous APK SHA-256 `1194042932e48dd9b4f6147e9e31f4570f4672401834e12067eacced02e3d7bc`. Not the six-file recovery candidate.|
+|Physical owner gate|Pending|No M03 tablet test, installation, approval, sustained presentation or pen latency claim. Preserve [M02 archive](M02_ACCEPTED.md).|

@@ -22,6 +22,7 @@
 #include "document/document.hpp"
 #include "document/change_queue.hpp"
 #include "document/codec.hpp"
+#include "document/eraser.hpp"
 #include "tablet/session.hpp"
 #include <cstring>
 #include "stroke/spline.hpp"
@@ -62,8 +63,16 @@ namespace {
             }
         }
     };
+    std::atomic<uint64_t> retainedMeshes{0},activeHigh{0},switchHigh{0},gpuRequested{0},gpuHigh{0};
+    std::atomic<uint64_t> historyCharge{0},queueHigh{0},canonicalCharge{0},snapshotHigh{0};
+    void peak(std::atomic<uint64_t>& counter,uint64_t value) {
+        auto prev=counter.load(std::memory_order_relaxed);
+        while(prev<value && !counter.compare_exchange_weak(prev,value,std::memory_order_relaxed)) {}
+    }
     struct CompletedGeometry {
         std::array<Mesh,3> derived;
+        uint64_t bytes=0;
+        ~CompletedGeometry(){retainedMeshes.fetch_sub(bytes,std::memory_order_relaxed);}
     };
 
     struct Trace {
@@ -77,6 +86,8 @@ namespace {
         Mesh tailMesh;
         Bounds bounds;
         document::Brush brush;
+        size_t meshAllowance=SIZE_MAX;
+        size_t scratchAllowance=SIZE_MAX;
         std::shared_ptr<const document::Ink> sealed;
         std::shared_ptr<CompletedGeometry> completion=std::make_shared<CompletedGeometry>();
         uint64_t tailRevision = 0;
@@ -156,9 +167,19 @@ namespace {
         Key next=0;
         document::Revision geometry=0;
         std::shared_ptr<FinishedTrace> shape;
+        size_t bytes=0;
+        std::array<float,4> rgba{};
     };
+    uint64_t workingBytes(const Trace& t) {
+        return t.input.raw_samples().capacity()*sizeof(input::RawInputPoint)+
+               t.input.clean_samples().capacity()*sizeof(input::CleanInputPoint)+t.spline.retainedBytes()+
+               (t.rawPoints.capacity()+t.cleanPoints.capacity())*sizeof(float)+
+               (t.rawMesh.capacity()+t.cleanMesh.capacity()+t.stableMesh.capacity()+t.tailMesh.capacity())*sizeof(Vertex);
+    }
     using Scene=std::map<Key,Published>;
     Scene finished, pendingScene;
+    size_t sceneBytes=0,sceneLimit=SIZE_MAX,canonicalLimit=SIZE_MAX;
+    constexpr size_t publicationLimit=65536;
     Key sceneHead=0;
     std::unique_ptr<document::Document> model;
     document::ChangeQueue saves;
@@ -168,9 +189,12 @@ namespace {
     // Stable IDs are assigned under stateMutex; GPU resources live only on GL thread.
     uint64_t finishedEpoch = 1;
     struct CachedGpuStroke {
+        CachedGpuStroke* following=nullptr; // stable map nodes; resolved when links change
         std::array<std::shared_ptr<const Mesh>, 3> source;
+        std::array<float,4> rgba{};
         std::array<GLuint, 3> vbo{};
         std::array<GLsizei, 3> count{};
+        std::array<size_t,3> storage{};
         float minX=0, minY=0, maxX=0, maxY=0;
         Key next=0;
         document::Revision geometry=0;
@@ -311,7 +335,7 @@ void main() {
     );
 
     if(uBand>0.0 && a<uBand-0.03125) discard;
-    gl_FragColor=vec4(0.0,0.0,0.0,uBand>0.0?uBand:a);
+    gl_FragColor=vec4(0.0,0.0,0.0,(uBand>0.0?uBand:a)*uColor.a);
 }
 )";
 
@@ -483,6 +507,20 @@ void main() {
             t.input.clean_samples().back().position.x!=c.position.x ||
             t.input.clean_samples().back().position.y!=c.position.y;
         try {
+            // Upper bound of geometrically grown non-mesh vectors (raw, clean,
+            // two point streams, knots, attributes and Hermite segment data).
+            if(t.scratchAllowance!=SIZE_MAX && t.input.raw_samples().size()+1>t.scratchAllowance/640)
+                return core::Error{core::ErrorCode::ResourceLimit,"Stroke scratch budget"};
+            constexpr size_t maxPart=(maxSteps+1)*6;
+            const auto stableExtra=moving && !t.input.clean_samples().empty()?2*maxPart+12:12;
+            if(t.meshAllowance!=SIZE_MAX) {
+                auto capacity=[](const Mesh& m,size_t extra) -> uint64_t {
+                    return m.capacity()-m.size()>=extra?m.capacity():m.size()+std::max(extra,m.size());
+                };
+                if(capacity(t.rawMesh,18)+capacity(t.cleanMesh,24)+capacity(t.stableMesh,stableExtra)>
+                        t.meshAllowance/sizeof(Vertex))
+                    return core::Error{core::ErrorCode::ResourceLimit,"Document geometry budget"};
+            }
             reserveExtra(t.rawPoints,2); reserveExtra(t.cleanPoints,2);
             reserveExtra(t.rawMesh,18); reserveExtra(t.cleanMesh,24);
             if(moving && !t.input.clean_samples().empty()) {
@@ -553,7 +591,7 @@ void main() {
 
     template<class Gather>
     void coverageLayer(const Bounds& box,double panX,double panY,double zoom,
-                       float r,float g,float b,Gather gather) {
+                       float r,float g,float b,Gather gather,float opacity=1.f) {
         // Match float camera uniforms; clip in double before integer conversion.
         auto edge=[](double p,int limit){return (int)std::clamp(p,0.,double(limit));};
         int x=edge(std::floor((box.minX-(double)(float)panX)*(float)zoom)-1,width);
@@ -575,6 +613,7 @@ void main() {
         // Core ES2 fallback: ascending opaque threshold bands. Each band
         // overwrites alpha only where covered, so alpha=round(16*max(a))/16.
         int passes=maxCoverage?1:16;
+        glUniform4f(colorLoc,r,g,b,opacity);
         for(int k=1;k<=passes;++k) {
             glUniform1f(bandLoc,maxCoverage?0.f:k/16.f);
             for(size_t i=0;i<partCount;++i) {
@@ -647,6 +686,8 @@ void main() {
             const size_t cap = std::max(n+std::min(finishRoom,std::max(size_t(12),n/8)),
                                         std::max(size_t(256), cached.capacityVertices * 2));
             glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(cap * sizeof(Vertex)), nullptr, GL_DYNAMIC_DRAW);
+            auto growth=(cap-cached.capacityVertices)*sizeof(Vertex);
+            peak(gpuHigh,gpuRequested.fetch_add(growth)+growth);
             cached.capacityVertices = cap;
             ++liveBufferReallocations;
         }
@@ -659,6 +700,7 @@ void main() {
             if(glGetError()!=GL_NO_ERROR) {
                 // Includes failed storage allocation. Do not publish a prefix
                 // length for bytes the driver did not accept. Retry from zero.
+                gpuRequested.fetch_sub(cached.capacityVertices*sizeof(Vertex));
                 glDeleteBuffers(1,&cached.vbo); cached={}; return;
             }
         }
@@ -669,7 +711,9 @@ void main() {
 
     void deleteGpuCache() {
         for (auto& [id,item] : gpuFinished)
-            for (GLuint vbo : item.vbo) if (vbo) glDeleteBuffers(1, &vbo);
+            for(size_t i=0;i<3;i++) if(item.vbo[i]) {
+                gpuRequested.fetch_sub(item.storage[i]);glDeleteBuffers(1,&item.vbo[i]);
+            }
         gpuFinished.clear();
     }
 
@@ -677,13 +721,18 @@ void main() {
         auto it=gpuFinished.find(id);
         if(it!=gpuFinished.end()) {
             it->second.next=patch.next;
+            it->second.rgba=patch.rgba;
             if(patch.shape && it->second.geometry==patch.geometry) return;
-            for(auto v:it->second.vbo) if(v) glDeleteBuffers(1,&v);
-            gpuFinished.erase(it);
+            for(size_t i=0;i<3;i++) if(it->second.vbo[i]) {
+                gpuRequested.fetch_sub(it->second.storage[i]);glDeleteBuffers(1,&it->second.vbo[i]);
+            }
+            if(!patch.shape) {gpuFinished.erase(it); return;}
+            it->second=CachedGpuStroke{};
         }
         if(!patch.shape) return;
         auto& item=gpuFinished[id];
         const auto& trace=*patch.shape;
+        item.rgba=patch.rgba;
         item.geometry=patch.geometry; item.next=patch.next;
         item.source = {trace.raw, trace.clean, trace.spline};
         item.minX = trace.minX; item.minY = trace.minY;
@@ -699,6 +748,7 @@ void main() {
                 // Same logical prefix, same EGL context, single GL owner.
                 // Never adopt provisional part 3; its contents are replaceable.
                 completed.vbo[i]=std::exchange(prefix.vbo,0);
+                completed.storage[i]=prefix.capacityVertices*sizeof(Vertex);
                 completed.count[i]=(GLsizei)prefix.uploadedVertices;
             }
         }
@@ -717,6 +767,7 @@ void main() {
                 glDeleteBuffers(1,&item.vbo[part]); item.vbo[part]=0; item.count[part]=0; return;
             }
             item.count[part] = (GLsizei)vertices.size();
+            item.storage[part]=bytes;peak(gpuHigh,gpuRequested.fetch_add(bytes)+bytes);
             frameUploadBytes += bytes;
             cacheUploadBytes += bytes;
         } else if((size_t)item.count[part]<vertices.size()) {
@@ -725,6 +776,7 @@ void main() {
             glBindBuffer(GL_ARRAY_BUFFER,item.vbo[part]);
             glBufferSubData(GL_ARRAY_BUFFER,(GLintptr)(prefix*sizeof(Vertex)),(GLsizeiptr)bytes,vertices.data()+prefix);
             if(glGetError()!=GL_NO_ERROR) {
+                gpuRequested.fetch_sub(item.storage[part]);item.storage[part]=0;
                 glDeleteBuffers(1,&item.vbo[part]); item.vbo[part]=0; item.count[part]=0; return;
             }
             item.count[part]=(GLsizei)vertices.size();
@@ -752,12 +804,49 @@ void main() {
 
 extern "C" {
 
-static bool reconstructV1(const std::shared_ptr<const document::Ink>&,FinishedTrace&);
+static bool reconstructV1(const std::shared_ptr<const document::Ink>&,FinishedTrace&,double dx=0,double dy=0,
+                          size_t allowance=SIZE_MAX,size_t scratchLimit=SIZE_MAX);
+static size_t meshBytes(const FinishedTrace& s) {
+    return (s.raw->capacity()+s.clean->capacity()+s.spline->capacity())*sizeof(Vertex);
+}
 struct SceneSink final : document::Observer {
     std::shared_ptr<FinishedTrace> appended;
+    size_t appendedBytes=0;
+    Scene appendNodes,appendPatch;
+    void reserveAppend(Key id,Key prev) {
+        appendNodes.clear();appendPatch.clear();
+        appendNodes.try_emplace(id);appendPatch.try_emplace(id);
+        if(prev) appendPatch.try_emplace(prev);
+    }
     bool worker=false;
     document::Status prepare(const document::Document& doc,std::span<const document::Touched> touched) override {
         Scene stage;
+        if(doc.canonicalBytes()>canonicalLimit) return document::Status::Memory;
+        if(appended && touched.size()==1 && appendNodes.count(touched.front().id) &&
+           appendPatch.count(touched.front().id) && (!touched.front().prev || appendPatch.count(touched.front().prev))) {
+            const auto [id,prev,next,geometryChanged]=touched.front();
+            if(next || appendedBytes>sceneLimit-sceneBytes) return document::Status::Memory;
+            if(persistent) {
+                auto status=saves.prepare(doc,touched);
+                if(status!=document::Status::Ok) return status;
+            }
+            auto& row=appendNodes.at(id);row={0,doc.revision()+1,appended,appendedBytes,doc.find(id)->value.rgba()};
+            appendPatch.at(id)=row;
+            if(prev) {
+                auto& predecessor=finished.at(prev);predecessor.next=id;appendPatch.at(prev)=predecessor;
+                pendingScene.erase(prev);
+            }
+            finished.merge(appendNodes);pendingScene.merge(appendPatch);
+            sceneHead=doc.first();sceneBytes+=appendedBytes;
+            return document::Status::Ok;
+        }
+        size_t projected=sceneBytes;
+        for(auto e:touched) {
+            if(e.geometry && stage.try_emplace(e.id).second) {
+                auto it=finished.find(e.id);
+                if(it!=finished.end()) projected-=it->second.bytes;
+            }
+        }
         bool valid=true;
         auto include=[&](Key id,bool changed) {
             if(!id) return;
@@ -767,21 +856,27 @@ struct SceneSink final : document::Observer {
             dst.next=r->next;
             if(changed && dst.geometry!=doc.revision()+1) {
                 dst.geometry=doc.revision()+1;
-                if(appended) dst.shape=appended;
+                if(appended) {dst.shape=appended;dst.bytes=appendedBytes;}
                 else {
                     dst.shape=std::make_shared<FinishedTrace>();
-                    if(!reconstructV1(r->value.ink,*dst.shape)) valid=false;
+                    if(!reconstructV1(r->value.ink,*dst.shape,r->value.dx,r->value.dy,sceneLimit-projected,canonicalLimit)) {valid=false;return;}
+                    dst.bytes=meshBytes(*dst.shape);
                 }
+                if(dst.bytes>sceneLimit-projected) {valid=false;return;}
+                projected+=dst.bytes;
             } else if(!dst.shape) {dst=finished.at(id);dst.next=r->next;}
+            dst.rgba=r->value.rgba();
         };
         // Subjects first: adjacent new subjects may not yet have a projection.
-        for(auto e:touched) include(e.id,true);
-        if(!valid) return document::Status::Invalid;
-        for(auto e:touched) {include(e.prev,false);include(e.next,false);}
+        for(auto e:touched) if(e.geometry) include(e.id,true);
+        if(!valid) return document::Status::Memory;
+        for(auto e:touched) {if(!e.geometry) include(e.id,false);include(e.prev,false);include(e.next,false);}
         Scene notifications=stage;
         std::unique_lock lock(stateMutex,std::defer_lock);
         if(worker) lock.lock();
         if(persistent) {
+            if(!appended && pendingScene.size()+stage.size()>publicationLimit)
+                return document::Status::QueueLimit;
             auto s=saves.prepare(doc,touched);
             if(s!=document::Status::Ok) return s;
         }
@@ -793,6 +888,7 @@ struct SceneSink final : document::Observer {
         for(auto& [id,p]:notifications) pendingScene.erase(id);
         pendingScene.merge(notifications);
         sceneHead=doc.first();
+        sceneBytes=projected;
         return document::Status::Ok;
     }
 };
@@ -878,17 +974,23 @@ Java_com_infinipaint_demo_NativeBridge_begin(
     }
 
     try {
-        if(!readyModel() || suspended || !model->canAllocate() || live.count(id)) return JNI_FALSE;
+        if(!readyModel() || suspended || !model->canAllocate() || live.count(id) ||
+           (persistent && (pendingScene.size()+2>publicationLimit ||
+                           model->canonicalBytes()+1024>canonicalLimit))) return JNI_FALSE;
         auto trace=std::make_unique<Trace>(std::move(inputProcessor.value()),std::move(fitter.value()));
         trace->strokeRadiusWorld = (float)(1.9 / cameraZoom);
+        trace->meshAllowance=sceneLimit-sceneBytes;
+        trace->scratchAllowance=canonicalLimit;
         trace->brush.filter=params;
         trace->brush.radiusWorld=trace->strokeRadiusWorld;
         trace->brush.tool=static_cast<uint32_t>(tool);
         if (!trace->input.begin_stroke()) return JNI_FALSE;
         trace->gpuId = nextLiveGpuId++;
+        if(live.empty()) sceneSink.reserveAppend(model->nextId(),model->last());
         if(persistent && !saves.admitStroke()) return JNI_FALSE;
+        if(model->reserveStroke()!=document::Status::Ok) {if(persistent) saves.cancelStroke();return JNI_FALSE;}
         try {live.emplace(id,std::move(trace));}
-        catch(...) {if(persistent) saves.cancelStroke(); throw;}
+        catch(...) {model->cancelStroke();if(persistent) saves.cancelStroke(); throw;}
         return JNI_TRUE;
     } catch(const std::bad_alloc&) { return JNI_FALSE; }
 }
@@ -932,7 +1034,9 @@ Java_com_infinipaint_demo_NativeBridge_sample(
         const auto& raw=trace.input.raw_samples();
         size_t capacity=raw.capacity();
         if(raw.size()==capacity) capacity=std::min<size_t>(1000000,std::max<size_t>(1,capacity*2));
-        if(!saves.growStroke(capacity*sizeof(input::RawInputPoint))) return JNI_FALSE;
+        const auto bytes=capacity*sizeof(input::RawInputPoint);
+        if(!model->acceptsStrokeCapacity(capacity) || model->canonicalBytes()+bytes+1024>canonicalLimit ||
+           !saves.growStroke(bytes)) return JNI_FALSE;
     }
     double worldX =
             cameraPanX + x / cameraZoom;
@@ -1070,15 +1174,21 @@ Java_com_infinipaint_demo_NativeBridge_end(
     try {
         auto shape=std::make_shared<FinishedTrace>();
         if(!trace.sealed) trace.sealed=std::make_shared<tablet::AdoptAccepted>(trace.input,trace.brush);
-        document::Edit add{document::Edit::InsertAfter,model->last(),{trace.sealed}};
         sceneSink.appended=shape;
+        sceneSink.appendedBytes=(trace.rawMesh.capacity()+trace.cleanMesh.capacity()+trace.stableMesh.capacity())*sizeof(Vertex);
+        peak(activeHigh,workingBytes(trace));
         saves.committingStroke(true);
-        auto result=model->edit(model->revision(),{&add,1});
+        auto result=model->commitStroke({trace.sealed});
         saves.committingStroke(false);
         sceneSink.appended.reset();
-        if(result!=document::Status::Ok) return JNI_FALSE;
+        if(result!=document::Status::Ok) {
+            __android_log_print(ANDROID_LOG_ERROR,"IP_EDIT","commit rejected status=%d revision=%lld samples=%zu",
+                                int(result),static_cast<long long>(model->revision()),trace.sealed->samples.size());
+            return JNI_FALSE;
+        }
         *shape=finishV1(trace,std::move(trace.sealed));
         visibleRevision.store(model->revision());
+        historyCharge.store(model->historyBytes());canonicalCharge.store(model->canonicalBytes());peak(queueHigh,saves.bytes());
     } catch(const std::bad_alloc&) { return JNI_FALSE; }
 
     const auto ink=trace.completion;
@@ -1123,54 +1233,86 @@ static FinishedTrace finishV1(Trace& trace,std::shared_ptr<const document::Ink> 
     trace.bounds.include(splineMesh,splineStart);
     auto ink=trace.completion;
     ink->derived={std::move(trace.rawMesh),std::move(trace.cleanMesh),std::move(splineMesh)};
+    for(const auto& m:ink->derived) ink->bytes+=m.capacity()*sizeof(Vertex);
+    retainedMeshes.fetch_add(ink->bytes,std::memory_order_relaxed);
     const auto& b=trace.bounds;
     return {std::move(record),{ink,&ink->derived[0]},{ink,&ink->derived[1]},
                      {ink,&ink->derived[2]},b.minX,b.minY,b.maxX,b.maxY,trace.gpuId};
 }
 
-[[maybe_unused]] static bool reconstructV1(const std::shared_ptr<const document::Ink>& record,FinishedTrace& out) {
+static bool reconstructV1(const std::shared_ptr<const document::Ink>& record,FinishedTrace& out,double dx,double dy,
+                          size_t allowance,size_t scratchLimit) {
     if(!record || record->brush.recipe!=1 || record->samples.empty()) return false;
     auto p=input::InputProcessor::create(record->brush.filter);
     auto f=stroke::SplineFitter::create({stroke::Parameterization::Centripetal,1000000,.01,14});
     if(!p || !f) return false;
     Trace scratch(std::move(p).value(),std::move(f).value());
     scratch.strokeRadiusWorld=record->brush.radiusWorld;
+    scratch.meshAllowance=allowance;
+    scratch.scratchAllowance=scratchLimit;
     if(!scratch.input.begin_stroke()) return false;
     for(const auto& s:record->samples)
         if(!appendV1(scratch,s,1,0,false)) return false;
+    peak(switchHigh,workingBytes(scratch)+document::Ink::liveBytes.load()+retainedMeshes.load()+gpuRequested.load());
     out=finishV1(scratch,record);
+    if(dx!=0 || dy!=0) {
+        Bounds b;
+        // Post-reconstruction translation: do not refilter displaced samples.
+        for(auto& mesh:scratch.completion->derived) {
+            for(auto& v:mesh) {
+                double x=double(v.x)+dx,y=double(v.y)+dy;
+                if(std::max(std::abs(x),std::abs(y))>std::numeric_limits<float>::max()/1024.) return false;
+                v.x=float(x);v.y=float(y);
+            }
+            b.include(mesh,0);
+        }
+        out.minX=b.minX;out.minY=b.minY;out.maxX=b.maxX;out.maxY=b.maxY;
+    }
     return true;
 }
 
 JNIEXPORT jlong JNICALL Java_com_infinipaint_demo_NativeBridge_revision(JNIEnv*,jclass) {
     return visibleRevision.load();
 }
+JNIEXPORT jlongArray JNICALL Java_com_infinipaint_demo_NativeBridge_memory(JNIEnv* env,jclass) {
+    std::array<jlong,13> a{};
+    {
+        std::lock_guard guard(stateMutex);
+        uint64_t active=0;
+        for(const auto& [id,t]:live) active+=workingBytes(*t);
+        a={jlong(document::Ink::liveBytes.load()),jlong(canonicalCharge.load()),jlong(retainedMeshes.load()),
+           jlong(active),jlong(activeHigh.load()),jlong(gpuRequested.load()),jlong(gpuHigh.load()),
+           jlong(historyCharge.load()),jlong(saves.bytes()),jlong(queueHigh.load()),jlong(switchHigh.load()),
+           jlong(snapshotHigh.load()),jlong(pendingScene.size())};
+    }
+    auto array=env->NewLongArray(a.size());if(array)env->SetLongArrayRegion(array,0,a.size(),a.data());return array;
+}
+JNIEXPORT jboolean JNICALL Java_com_infinipaint_storage_StorePort_needsIds(JNIEnv*,jclass) {
+    std::lock_guard guard(stateMutex);
+    return model && !model->canAllocate();
+}
+JNIEXPORT jboolean JNICALL Java_com_infinipaint_storage_StorePort_refill(JNIEnv*,jclass,jlong first,jlong last) {
+    std::lock_guard guard(stateMutex);
+    return model && model->grant(first,last);
+}
 JNIEXPORT void JNICALL Java_com_infinipaint_demo_NativeBridge_suspend(JNIEnv*,jclass,jboolean value) {
     std::lock_guard guard(stateMutex);suspended=value;
 }
-static bool hit(const FinishedTrace& ink,core::Vec2 a,core::Vec2 b,double tolerance) {
+static bool hit(const FinishedTrace& ink,core::Vec2 a,core::Vec2 b,double tolerance,
+                std::map<double,double>& coverage,size_t& intervalCount) {
     if(std::max(a.x,b.x)+tolerance<ink.minX || std::min(a.x,b.x)-tolerance>ink.maxX ||
        std::max(a.y,b.y)+tolerance<ink.minY || std::min(a.y,b.y)-tolerance>ink.maxY) return false;
-    auto delta=b-a;double len=delta.length_sq();
+    bool any=false;
     for(size_t i=0;i<ink.spline->size();i+=6) {
         const auto& v=(*ink.spline)[i];
-        auto separation=[&](double t) {
-            core::Vec2 p{v.x+t*v.len*v.dirX,v.y+t*v.len*v.dirY};
-            auto rel=p-a;
-            double u=len?std::clamp((rel.x*delta.x+rel.y*delta.y)/len,0.,1.):0.;
-            return (rel-delta*u).length()-std::lerp(double(v.radius),double(v.endRadius),t)-tolerance;
-        };
-        if(separation(0)<=0 || separation(1)<=0) return true;
-        // Convex distance to swept segment minus linearly varying ink radius.
-        double lo=0,hi=1;
-        for(int j=0;j<36;j++) {
-            double l=(2*lo+hi)/3,r=(lo+2*hi)/3;
-            double dl=separation(l),dr=separation(r);
-            if(std::min(dl,dr)<=0) return true;
-            if(dl<=dr) hi=r; else lo=l;
-        }
+        core::Vec2 p{v.x,v.y},q{v.x+v.len*v.dirX,v.y+v.len*v.dirY};
+        auto before=coverage.size();
+        any|=document::expose(coverage,document::clipInk(a,b,p,q,v.radius+tolerance,v.endRadius+tolerance));
+        intervalCount=intervalCount-before+coverage.size();
+        if(intervalCount>65536) throw std::length_error("Eraser interval budget");
+        if(coverage.size()==1 && coverage.begin()->first==0 && coverage.begin()->second==1) break;
     }
-    return false;
+    return any;
 }
 JNIEXPORT jint JNICALL Java_com_infinipaint_demo_NativeBridge_command(JNIEnv* env,jclass,jint op,
                                                                       jdoubleArray path,jdouble tolerance) {
@@ -1194,21 +1336,36 @@ JNIEXPORT jint JNICALL Java_com_infinipaint_demo_NativeBridge_command(JNIEnv* en
             std::vector<double> points(n);
             env->GetDoubleArrayRegion(path,0,n,points.data());
             if(env->ExceptionCheck()) return int(S::Invalid);
-            std::map<Key,bool> removed;
+            std::vector<std::map<double,double>> coverage(n/2);
             std::vector<document::Edit> edits;
+            double left=points[0],top=points[1],right=left,bottom=top;
             for(int i=0;i<n;i+=2) {
-                core::Vec2 a{points[std::max(0,i-2)],points[std::max(0,i-2)+1]},b{points[i],points[i+1]};
-                if(!a.finite() || !b.finite()) return int(S::Invalid);
-                for(Key id=model->last();id;id=model->find(id)->prev) {
-                    if(!removed.count(id) && hit(*finished.at(id).shape,a,b,tolerance)) {
-                        edits.push_back({document::Edit::Remove,id});removed.emplace(id,true);break;
-                    }
+                if(!std::isfinite(points[i]) || !std::isfinite(points[i+1])) return int(S::Invalid);
+                left=std::min(left,points[i]);right=std::max(right,points[i]);
+                top=std::min(top,points[i+1]);bottom=std::max(bottom,points[i+1]);
+            }
+            size_t intervals=0;
+            for(Key id=model->last();id;id=model->find(id)->prev) {
+                auto& ink=*finished.at(id).shape;
+                if(ink.maxX<left-tolerance || ink.minX>right+tolerance ||
+                   ink.maxY<top-tolerance || ink.minY>bottom+tolerance) continue;
+                bool exposed=false;
+                for(int i=n>2?2:0;i<n;i+=2) {
+                    core::Vec2 a{points[std::max(0,i-2)],points[std::max(0,i-2)+1]},b{points[i],points[i+1]};
+                    auto& cover=coverage[i/2];
+                    if(cover.size()==1 && cover.begin()->first==0 && cover.begin()->second==1) continue;
+                    exposed|=hit(ink,a,b,tolerance,cover,intervals);
                 }
+                if(exposed) edits.push_back({document::Edit::Remove,id});
             }
             result=model->edit(rev,edits);
         }
-        if(result==S::Ok) visibleRevision.store(model->revision());
+        if(result==S::Ok) {
+            visibleRevision.store(model->revision());historyCharge.store(model->historyBytes());
+            canonicalCharge.store(model->canonicalBytes());peak(queueHigh,saves.bytes());
+        }
     } catch(const std::bad_alloc&) {return int(S::Memory);}
+      catch(const std::length_error&) {return int(S::Memory);}
     return int(result);
 }
 
@@ -1240,6 +1397,7 @@ bool ipTestCodecReplay() {
         if(!equal(old.raw,replay.raw)||!equal(old.clean,replay.clean)||!equal(old.spline,replay.spline)) return false;
         old=std::move(replay);
     }
+    pendingScene=finished;
     ++finishedEpoch;
     return !finished.empty();
 }
@@ -1258,7 +1416,7 @@ Java_com_infinipaint_demo_NativeBridge_cancel(
 
     std::lock_guard<std::mutex> guard(stateMutex);
 
-    if(live.erase(id) && persistent) saves.cancelStroke();
+    if(live.erase(id)) {model->cancelStroke();if(persistent) saves.cancelStroke();}
 }
 
 // --------------------------------------------------
@@ -1275,7 +1433,7 @@ Java_com_infinipaint_demo_NativeBridge_clear(
 
     live.clear();
     saves.cancelStroke();
-    if(model) (void)model->clear(model->revision());
+    if(model) {model->cancelStroke();(void)model->clear(model->revision());}
 }
 
 // --------------------------------------------------
@@ -1300,9 +1458,11 @@ JNIEXPORT void JNICALL
 Java_com_infinipaint_demo_NativeBridge_contextCreated(JNIEnv*, jclass) {
     // Old EGL context already owns/disposes its objects. The same numeric
     // names may identify unrelated objects in the newly current context.
-    gpuFinished.clear();
+    // Topology and immutable CPU sources survive EGL loss. Never reuse/delete
+    // stale numeric names in the new context. No full snapshot on the input lock.
+    gpuRequested.store(0);
+    for(auto& [id,item]:gpuFinished) {item.vbo={};item.count={};item.storage={};}
     gpuLive.clear();
-    gpuEpoch = 0;
     program = 0;
     buffer = 0;
 
@@ -1504,10 +1664,7 @@ Java_com_infinipaint_demo_NativeBridge_render(
 
         frameEpoch = finishedEpoch;
         // Epoch mismatch means clear; GL thread will retire old cache below.
-        if(gpuEpoch!=frameEpoch) {
-            newCompleted=finished;
-            pendingScene.clear();
-        } else newCompleted.swap(pendingScene);
+        if(program && buffer) newCompleted.swap(pendingScene);
         frameHead=sceneHead;
 
         active.reserve(live.size());
@@ -1553,6 +1710,8 @@ Java_com_infinipaint_demo_NativeBridge_render(
                 q.maxY=std::max(q.maxY,std::max(view.lastY,view.filteredY)+pad);
             }
 
+            peak(snapshotHigh,(view.raw.data.capacity()+view.clean.data.capacity()+view.stable.data.capacity()+
+                               view.tail.data.capacity())*sizeof(Vertex));
             active.emplace_back(trace.gpuId, std::move(view));
         }
         auditSnapshotNs.fetch_add(profileNs() - snapshotStartNs, std::memory_order_relaxed);
@@ -1600,20 +1759,24 @@ Java_com_infinipaint_demo_NativeBridge_render(
         // This frame already captured the full replacement snapshot.
     }
     for (const auto& [id,patch] : newCompleted) cacheFinished(id,patch);
+    for (const auto& [id,patch] : newCompleted) if(patch.shape) {
+        auto& node=gpuFinished.at(id);
+        node.following=node.next?&gpuFinished.at(node.next):nullptr;
+    }
     // Cull in the same quantized viewport used by the existing float shader.
     const double viewMinX = (float)framePanX, viewMinY = (float)framePanY;
     const double viewMaxX = viewMinX + width/(double)(float)frameZoom;
     const double viewMaxY = viewMinY + height/(double)(float)frameZoom;
     uint64_t visibleCompleted = 0;
-    for (Key id=frameHead;id;) {
-        auto& cached=gpuFinished.at(id);
-        id=cached.next;
+    for (auto* node=frameHead?&gpuFinished.at(frameHead):nullptr;node;node=node->following) {
+        auto& cached=*node;
         if (cached.maxX < viewMinX || cached.minX > viewMaxX ||
             cached.maxY < viewMinY || cached.minY > viewMaxY) continue;
         ++visibleCompleted;
         auto drawPart = [&](int part, float r, float g, float b) {
+            if(part==2) {r=cached.rgba[0];g=cached.rgba[1];b=cached.rgba[2];}
             coverageLayer({cached.minX,cached.minY,cached.maxX,cached.maxY},framePanX,framePanY,frameZoom,r,g,b,
-                [&]{drawFinishedPart(cached,part,r,g,b);});
+                [&]{drawFinishedPart(cached,part,r,g,b);},cached.rgba[3]);
         };
         if (mode == 0) drawPart(0, 0.20f, 0.95f, 0.78f);
         else if (mode == 1) drawPart(1, 1.0f, 0.76f, 0.20f);
@@ -1630,7 +1793,9 @@ Java_com_infinipaint_demo_NativeBridge_render(
         bool present = false;
         for (const auto& entry : active) if (entry.first == it->first) { present = true; break; }
         if (!present) {
-            for (auto& part : it->second) if (part.vbo) glDeleteBuffers(1, &part.vbo);
+            for (auto& part : it->second) if (part.vbo) {
+                gpuRequested.fetch_sub(part.capacityVertices*sizeof(Vertex));glDeleteBuffers(1,&part.vbo);
+            }
             it = gpuLive.erase(it);
         } else ++it;
     }
@@ -1747,33 +1912,52 @@ Java_com_infinipaint_demo_NativeBridge_render(
 } // extern "C"
 
 namespace engine::tablet {
-bool install(std::unique_ptr<document::Document> candidate,size_t meshBudget) {
+static Scene stagedScene,stagedPublication;
+static size_t stagedBytes,stagedLimit,stagedCanonicalLimit;
+static std::unique_ptr<document::Document> stagedModel;
+bool stage(std::unique_ptr<document::Document> candidate,size_t meshBudget) {
     Scene replacement;
+    stagedLimit=meshBudget; stagedCanonicalLimit=meshBudget/8*3;
+    if(candidate->canonicalBytes()>stagedCanonicalLimit) return false;
     for(Key id=candidate->first();id;) {
         const auto& r=*candidate->find(id);
         auto shape=std::make_shared<FinishedTrace>();
-        if(!reconstructV1(r.value.ink,*shape)) return false;
+        if(!reconstructV1(r.value.ink,*shape,r.value.dx,r.value.dy,meshBudget,stagedCanonicalLimit)) return false;
+        const auto bytes=meshBytes(*shape);
         for(const auto& mesh:{shape->raw,shape->clean,shape->spline}) {
             if(mesh->capacity()>meshBudget/sizeof(Vertex)) return false;
             meshBudget-=mesh->capacity()*sizeof(Vertex);
         }
-        replacement.emplace(id,Published{r.next,r.geometry,std::move(shape)});
+        replacement.emplace(id,Published{r.next,r.geometry,std::move(shape),bytes,r.value.rgba()});
         id=r.next;
     }
-    Scene retired;
     {
         std::lock_guard guard(stateMutex);
         if(!live.empty() || saves.size() || (model && !suspended)) return false;
-        model.swap(candidate);
-        finished.swap(replacement);
+    }
+    stagedBytes=stagedLimit-meshBudget;
+    stagedPublication=replacement; // worker only, all allocations before db.select
+    stagedScene.swap(replacement);stagedModel.swap(candidate);
+    return true;
+}
+void activate(double x,double y,double zoom) noexcept {
+    Scene retired;
+    {
+        std::lock_guard guard(stateMutex);
+        model.swap(stagedModel);
+        finished.swap(stagedScene);
         retired.swap(pendingScene);
+        pendingScene.swap(stagedPublication);
         sceneHead=model->first();
+        sceneBytes=stagedBytes;sceneLimit=stagedLimit;canonicalLimit=stagedCanonicalLimit;
+        cameraPanX=x;cameraPanY=y;cameraZoom=zoom;
         ++finishedEpoch; persistent=true;
         model->observe(&sceneSink);
         visibleRevision.store(model->revision());
+        historyCharge.store(0);canonicalCharge.store(model->canonicalBytes());
     }
-    return true;
 }
+void discard() noexcept {stagedScene.clear();stagedPublication.clear();stagedModel.reset();}
 std::shared_ptr<const document::ChangeSet> nextSave() {
     std::lock_guard guard(stateMutex); return saves.front();
 }

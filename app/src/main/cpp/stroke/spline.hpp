@@ -97,6 +97,11 @@ public:
         return distinct_count_ > 2 ? distinct_count_ - 2 : 0;
     }
     [[nodiscard]] std::size_t sample_count() const noexcept { return points_.size(); }
+    [[nodiscard]] uint64_t retainedBytes() const noexcept {
+        return points_.capacity()*sizeof(SplinePoint)+knot_indices_.capacity()*sizeof(size_t)+
+               peak_pressure_.capacity()*sizeof(float)+cached_.segments_.capacity()*sizeof(FittedSpline::Segment)+
+               cached_.source_.capacity()*sizeof(SplinePoint);
+    }
     void reset() noexcept { points_.clear(); knot_indices_.clear(); peak_pressure_.clear(); cached_ = FittedSpline{}; distinct_count_ = 0; }
 private:
     SplineFitter fitter_;

@@ -52,6 +52,12 @@ public final class DocumentDatabase implements Closeable {
             }
             if(!Arrays.equals(magic,"SQLite format 3\0".getBytes(StandardCharsets.US_ASCII)))
                 throw new SQLiteException("Not a SQLite catalog; files preserved");
+            // Check compatibility before allowing the writable connection to
+            // change journal mode or run schema statements on an unknown file.
+            SQLiteDatabase.OpenParams probe=new SQLiteDatabase.OpenParams.Builder()
+                    .setOpenFlags(SQLiteDatabase.OPEN_READONLY)
+                    .setErrorHandler(d->{throw new SQLiteException("Catalog corrupt; files preserved");}).build();
+            try(SQLiteDatabase ro=SQLiteDatabase.openDatabase(path,probe)) {verifyFormat(ro);}
         }
         SQLiteDatabase.OpenParams.Builder params = new SQLiteDatabase.OpenParams.Builder()
                 .setOpenFlags(SQLiteDatabase.OPEN_READWRITE | SQLiteDatabase.ENABLE_WRITE_AHEAD_LOGGING
@@ -71,9 +77,7 @@ public final class DocumentDatabase implements Closeable {
                         !"1".equals(scalar(db, "PRAGMA foreign_keys")))
                     throw new SQLiteException("Required SQLite durability settings unavailable");
                 if (initialize) createSchema(db);
-                if (db.getVersion() != FORMAT ||
-                        !Integer.toString(APPLICATION_ID).equals(scalar(db, "PRAGMA application_id")))
-                    throw new SQLiteException("Unsupported catalog; migration not performed");
+                verifyFormat(db);
                 db.setTransactionSuccessful();
             } finally {
                 db.endTransaction();
@@ -90,6 +94,10 @@ public final class DocumentDatabase implements Closeable {
             if (!c.moveToFirst()) throw new SQLiteException("Missing catalog value");
             return c.getString(0);
         }
+    }
+    private static void verifyFormat(SQLiteDatabase db) {
+        if(db.getVersion()!=FORMAT || !Integer.toString(APPLICATION_ID).equals(scalar(db,"PRAGMA application_id")))
+            throw new SQLiteException("Unsupported catalog; migration not performed");
     }
 
     private static void createSchema(SQLiteDatabase db) {
@@ -114,6 +122,16 @@ public final class DocumentDatabase implements Closeable {
                 " FOREIGN KEY(doc,id) REFERENCES stroke(doc,id) ON DELETE CASCADE) WITHOUT ROWID");
         db.execSQL("PRAGMA application_id=" + APPLICATION_ID);
         db.setVersion(FORMAT);
+    }
+    /** Diagnostic evidence from this connection. A FULL checkpoint is explicit,
+     * never triggered on input or as part of every autosave. */
+    long[] checkpointStats() {
+        checkThread();
+        try(Cursor c=db.rawQuery("PRAGMA wal_checkpoint(FULL)",null)) {
+            if(!c.moveToFirst()) throw new SQLiteException("No checkpoint statistics");
+            return new long[]{c.getLong(0),c.getLong(1),c.getLong(2),
+                    Long.parseLong(scalar(db,"PRAGMA page_size")),Long.parseLong(scalar(db,"PRAGMA cache_size"))};
+        }
     }
 
     private void checkThread() {
@@ -228,6 +246,11 @@ public final class DocumentDatabase implements Closeable {
         }
         public void insertAfter(long id,long prev,byte[] header,int count,ChunkSource source) {
             insert(id,prev,prev==0?head:links(tx(),prev)[1],header,count,source);
+        }
+        void restoreGeometryRevision(long id,long geometry) {
+            if(geometry<=0 || geometry>revision) throw new SQLiteException("Invalid geometry revision");
+            if(geometry!=revision) tx().execSQL("UPDATE stroke SET geometry_rev=? WHERE doc=? AND id=?",
+                    new Object[]{geometry,key,id});
         }
         public void clear() {
             SQLiteDatabase db=tx(); failed=true;

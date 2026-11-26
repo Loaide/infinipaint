@@ -7,7 +7,10 @@
 #include <jni.h>
 #include <array>
 #ifdef IP_REPLAY_TEST
+#include "tablet/session.hpp"
 extern "C" bool ipTestCodecReplay();
+extern "C" void Java_com_infinipaint_demo_NativeBridge_suspend(JNIEnv*,jclass,jboolean);
+extern "C" jint Java_com_infinipaint_demo_NativeBridge_command(JNIEnv*,jclass,jint,jdoubleArray,jdouble);
 #endif
 
 #include <algorithm>
@@ -78,6 +81,7 @@ struct Pbuffer {
     EGLDisplay display = eglGetDisplay(EGL_DEFAULT_DISPLAY);
     EGLSurface surface = EGL_NO_SURFACE;
     EGLContext context = EGL_NO_CONTEXT;
+    EGLConfig config=nullptr;
 
     Pbuffer() {
         eglCheck(display != EGL_NO_DISPLAY, "eglGetDisplay");
@@ -92,7 +96,6 @@ struct Pbuffer {
         check(count > 0, "no candidate EGL pbuffer configs");
         std::vector<EGLConfig> configs(count);
         eglCheck(eglChooseConfig(display, format, configs.data(), count, &count), "eglChooseConfig");
-        EGLConfig config = nullptr;
         for (int i = 0; i < count; ++i) {
             const auto value = [&](EGLint attribute) {
                 EGLint result = 0;
@@ -121,6 +124,16 @@ struct Pbuffer {
         eglDestroyContext(display, context);
         eglDestroySurface(display, surface);
         eglTerminate(display);
+    }
+    void recreate() {
+        eglCheck(eglMakeCurrent(display,EGL_NO_SURFACE,EGL_NO_SURFACE,EGL_NO_CONTEXT),"unbind");
+        eglCheck(eglDestroyContext(display,context),"destroy old context");
+        const EGLint attrs[]={EGL_CONTEXT_CLIENT_VERSION,2,EGL_NONE};
+        context=eglCreateContext(display,config,EGL_NO_CONTEXT,attrs);
+        eglCheck(context!=EGL_NO_CONTEXT && eglMakeCurrent(display,surface,surface,context),"new context");
+        glDisable(GL_DITHER);
+        Java_com_infinipaint_demo_NativeBridge_contextCreated(nullptr,nullptr);
+        Java_com_infinipaint_demo_NativeBridge_resizeViewport(nullptr,nullptr,width,height);
     }
 };
 
@@ -371,7 +384,7 @@ void comparePortableRamp() {
 } // namespace
 
 int main() {
-    const Pbuffer pbuffer;
+    Pbuffer pbuffer;
     const auto* version = reinterpret_cast<const char*>(glGetString(GL_VERSION));
     const auto* renderer = reinterpret_cast<const char*>(glGetString(GL_RENDERER));
     check(version && renderer, "missing GL version or renderer");
@@ -419,6 +432,40 @@ int main() {
     const std::array<Frame,4> before{render(0),render(1),render(2),render(3)};
     check(ipTestCodecReplay(),"reconstructed vertex streams differ");
     for(int i=0;i<4;i++) check(render(i)==before[i],"canonical replay pixels differ");
+    Java_com_infinipaint_demo_NativeBridge_suspend(nullptr,nullptr,true);
+    auto edit=[](int op){check(Java_com_infinipaint_demo_NativeBridge_command(nullptr,nullptr,op,nullptr,0)==0,"edit rejected");};
+    edit(3);check(render(2)==blank,"clear publication left stale geometry");
+    edit(1);
+    for(int i=0;i<4;i++) check(render(i)==before[i],"undo Clear did not restore pixels");
+    edit(2);edit(1); // two changes before the next frame
+    check(render(3)==before[3],"coalesced redo/undo resurrected wrong scene");
+    pbuffer.recreate();
+    for(int i=0;i<4;i++) check(render(i)==before[i],"new EGL context lost edited scene");
+    using namespace engine::document;
+    // Two documents reuse the same local IDs. Translation is applied after
+    // reconstruction. Changing only their temporal order must reverse the blend.
+    for(int rev=0;rev<=1;rev++) {
+        auto d=std::make_unique<Document>(Uuid{uint8_t(42+rev)});
+        for(int i=0;i<2;i++) {
+            Brush b;b.radiusWorld=6;
+            b.rgba=(i^rev)?std::array<float,4>{0,0,1,.5f}:std::array<float,4>{1,0,0,.5f};
+            engine::input::RawInputStroke rawPoint{{{10.5,24.5},1,1,0,0}};
+            Value v{std::make_shared<const Ink>(std::move(rawPoint),b),40,0};
+            check(d->restore(i+1,i,v,1,1,1,2)==Status::Ok,"restore test record");
+        }
+        check(d->finishRestore(1,2)==Status::Ok && d->grant(3,20),"restore high water");
+        check(engine::tablet::stage(std::move(d),1<<20),"stage document");
+        engine::tablet::activate(0,0,1);engine::tablet::discard();
+        auto image=render(2);
+        auto pixel=at(image,50,24);
+        check(at(image,10,24)==background && (rev?pixel[0]>pixel[2]:pixel[2]>pixel[0]) &&
+              std::min(pixel[0],pixel[2])>30 && std::max(pixel[0],pixel[2])<200,"translation/opacity/order/switch");
+        Java_com_infinipaint_demo_NativeBridge_setCamera(nullptr,nullptr,1000,2000,1);
+        check(render(2)==blank,"offscreen switch projection");
+        Java_com_infinipaint_demo_NativeBridge_setCamera(nullptr,nullptr,0,0,1);
+        check(render(2)==image,"offscreen return");
+    }
+    Java_com_infinipaint_demo_NativeBridge_suspend(nullptr,nullptr,false);
     std::puts("PASS: v1 codec and reconstruction vertex bytes + 4-mode RGBA parity");
 #endif
     clear();

@@ -1,5 +1,6 @@
 #include "document/codec.hpp"
 #include "document/change_queue.hpp"
+#include "document/eraser.hpp"
 #include <cassert>
 #include <cstdio>
 #include <random>
@@ -120,8 +121,55 @@ void saturation() {
     while(auto token=q.front()) assert(q.acknowledge(token));
     assert(!q.bytes() && q.admitStroke()); q.cancelStroke(); assert(!q.bytes());
 }
+void clipping() {
+    // Two separated dots crossed in one motion; exact same topmost footprint is
+    // not erased through. A miss, taper and zero-length eraser remain defined.
+    std::map<double,double> seen;
+    auto sweep=[&](double x,double radius) {
+        return clipInk({0,0},{20,0},{x,0},{x,0},radius,radius);
+    };
+    assert(expose(seen,sweep(15,1)) && expose(seen,sweep(5,1)) && !expose(seen,sweep(15,.5)));
+    auto taper=clipInk({5,-10},{5,10},{0,0},{10,0},1,3);
+    assert(taper.lo<.41 && taper.hi>.59 && taper.lo>.38 && taper.hi<.62);
+    assert(clipInk({0,0},{0,0},{0,0},{2,0},1,1).hi==1);
+    assert(clipInk({0,5},{2,5},{0,0},{2,0},1,1).hi==0);
+}
+void contentAndLimits() {
+    Document d({3},{2,4096});
+    ChangeQueue q;d.observe(&q);assert(d.grant(1,100));
+    auto value=dot();
+    Edit a{Edit::InsertAfter,0,value};
+    assert(d.edit(0,{&a,1})==Status::Ok);q.acknowledge(q.front());
+    auto styled=value;styled.tint=std::array<float,4>{1,0,0,.4f};
+    Edit r{Edit::Replace,1,styled};
+    assert(d.edit(1,{&r,1})==Status::Ok && d.find(1)->geometry==1 && d.find(1)->content==2);
+    assert(q.front()->rows[0].geometry==1 && q.front()->rows[0].value.rgba()[3]==.4f);
+    assert(d.undo(2)==Status::Ok && d.find(1)->geometry==1 && d.find(1)->value.rgba()==value.rgba());
+    assert(d.redo(3)==Status::Ok && d.find(1)->geometry==1 && d.find(1)->value.rgba()==styled.rgba());
+    while(q.front()) q.acknowledge(q.front());
+    for(int i=0;i<16;i++) assert(d.edit(d.revision(),{&a,1})==Status::Ok);
+    auto rev=d.revision();auto last=d.last(),first=d.first();auto bytes=d.canonicalBytes();
+    assert(d.clear(rev)==Status::HistoryLimit && rev==d.revision() && d.size()==17 &&
+           last==d.last() && first==d.first() && bytes==d.canonicalBytes());
+}
+void tickets() {
+    Document d({7});ChangeQueue q;
+    d.observe(&q);assert(d.grant(1,8));
+    auto v=dot();
+    assert(d.reserveStroke()==Status::Ok && d.reserveStroke()==Status::Conflict);
+    assert(d.revision()==0 && d.size()==0 && !d.acceptsStrokeCapacity(SIZE_MAX));
+    assert(d.clear(0)==Status::Conflict);
+    d.cancelStroke();assert(d.commitStroke(v)==Status::Conflict);
+    assert(d.reserveStroke()==Status::Ok && q.admitStroke() && q.growStroke(sizeof(engine::input::RawInputPoint)));
+    q.committingStroke(true);
+    assert(d.commitStroke(v)==Status::Ok && d.commitStroke(v)==Status::Conflict);
+    q.committingStroke(false);
+    assert(d.first()==2 && d.last()==2 && d.revision()==1 && q.front()->tail==2);
+    assert(d.undo(1)==Status::Ok && d.reserveStroke()==Status::Ok);
+    d.cancelStroke();assert(d.redo(2)==Status::Ok && d.first()==2);
+}
 }
 int main() {
-    codec(); edits(); oracle(); saturation();
+    codec(); edits(); oracle(); saturation(); clipping();contentAndLimits();tickets();
     std::puts("PASS M03 v1 codec, reversible splices, history, ID ranges, seeded 10000-step ordered oracle, queue reserve/saturation/retry");
 }

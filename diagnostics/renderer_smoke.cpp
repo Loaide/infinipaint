@@ -13,6 +13,7 @@
 #include <vector>
 #include <cstring>
 #include <new>
+#include "tablet/session.hpp"
 
 // Single-threaded fault injection. Trigger exactly one scalar allocation.
 static int failAfter=-1;
@@ -34,6 +35,8 @@ jboolean Java_com_infinipaint_demo_NativeBridge_sample(JNIEnv*,jclass,jint,jdoub
 jboolean Java_com_infinipaint_demo_NativeBridge_end(JNIEnv*,jclass,jint);
 void Java_com_infinipaint_demo_NativeBridge_cancel(JNIEnv*,jclass,jint);
 void Java_com_infinipaint_demo_NativeBridge_clear(JNIEnv*,jclass);
+void Java_com_infinipaint_demo_NativeBridge_suspend(JNIEnv*,jclass,jboolean);
+jint Java_com_infinipaint_demo_NativeBridge_command(JNIEnv*,jclass,jint,jdoubleArray,jdouble);
 void Java_com_infinipaint_demo_NativeBridge_render(JNIEnv*,jclass,jint);
 }
 static unsigned nextId=1;
@@ -60,6 +63,9 @@ static std::vector<uint8_t> drawnVertices() {
 static long long lastWaitNs;
 extern "C" {
 int __android_log_print(int,const char* tag,const char* fmt,...) {
+    if(!std::strcmp(tag,"IP_EDIT")) {
+        va_list a;va_start(a,fmt);std::vfprintf(stderr,fmt,a);va_end(a);std::fputc('\n',stderr);
+    }
     if(!std::strcmp(tag,"IP_PEN_UP")) {
         va_list a; va_start(a,fmt); (void)va_arg(a,size_t); lastHoldNs=va_arg(a,long long);
         lastWaitNs=va_arg(a,long long); va_end(a);
@@ -133,19 +139,27 @@ void glBlendFunc(GLenum,GLenum) {}
 static void check(bool ok,const char* msg){if(!ok){std::fprintf(stderr,"FAIL: %s\n",msg);std::exit(1);}}
 #include <chrono>
 #include <algorithm>
-int main(int argc,char**){
+int main(int argc,char** argv){
     auto render=[](int mode){Java_com_infinipaint_demo_NativeBridge_render(nullptr,nullptr,mode);};
     auto sample=[](int n,double timestamp){return Java_com_infinipaint_demo_NativeBridge_sample(nullptr,nullptr,1,
         100+3*n,250+25*std::sin(n*0.13),timestamp,0.6f,0,0)==JNI_TRUE;};
     auto resize=[](int w,int h){Java_com_infinipaint_demo_NativeBridge_resizeViewport(nullptr,nullptr,w,h);};
     if(argc>1) {
         using clock=std::chrono::steady_clock;
+        bool queue=std::string_view(argv[1])=="bench-queue";
+        if(queue) {
+            auto d=std::make_unique<engine::document::Document>(engine::document::Uuid{3});
+            check(d->grant(1,65536) && engine::tablet::stage(std::move(d),96u<<20),"bench document");
+            engine::tablet::activate(0,0,1);engine::tablet::discard();
+        }
+        std::printf("pen-up bench save queue %s; no disk worker or concurrent GL\n",queue?"enabled":"disabled");
         Java_com_infinipaint_demo_NativeBridge_contextCreated(nullptr,nullptr);
         resize(1200,800);
         for(int n:{256,4096}) {
             std::vector<double> endUs, sampleUs, holdUs,waitUs;
             for(int rep=0;rep<101;++rep) {
                 Java_com_infinipaint_demo_NativeBridge_clear(nullptr,nullptr);
+                if(queue) while(auto g=engine::tablet::nextSave()) check(engine::tablet::acknowledge(g),"release queue");
                 check(Java_com_infinipaint_demo_NativeBridge_begin(nullptr,nullptr,1,2),"bench begin");
                 for(int i=0;i<n;++i) {
                     auto start=clock::now();
@@ -314,5 +328,17 @@ int main(int argc,char**){
         createContext();render(2);
         check(actual==drawnVertices(),"completed bytes match clean context rebuild");
     }
-    std::printf("PASS bridge: incremental VBO, real One-Euro/spline/preset geometry differences, lazy uploads, culling, zoom, same-time, context restore, clear; incremental_bytes=%llu\n",(unsigned long long)incrementalBytes);
+    Java_com_infinipaint_demo_NativeBridge_clear(nullptr,nullptr);
+    for(int i=0;i<2;i++) {
+        check(Java_com_infinipaint_demo_NativeBridge_begin(nullptr,nullptr,i,2),"cache fixture begin");
+        check(Java_com_infinipaint_demo_NativeBridge_sample(nullptr,nullptr,i,40+i*10,40,1,1,0,0),"cache fixture sample");
+        check(Java_com_infinipaint_demo_NativeBridge_end(nullptr,nullptr,i),"cache fixture end");
+    }
+    render(2);Java_com_infinipaint_demo_NativeBridge_suspend(nullptr,nullptr,true);
+    transferBytes=0;bufferAllocs=0;
+    check(!Java_com_infinipaint_demo_NativeBridge_command(nullptr,nullptr,1,nullptr,0),"undo add");
+    render(2);check(!transferBytes && !bufferAllocs,"unrelated geometry upload after undo");
+    check(!Java_com_infinipaint_demo_NativeBridge_command(nullptr,nullptr,2,nullptr,0),"redo add");
+    render(2);check(bufferAllocs==1,"redo uploaded more than restored record");
+    std::printf("PASS bridge: incremental VBO, real One-Euro/spline/preset geometry differences, lazy uploads, culling, zoom, same-time, context restore, clear, zero unrelated undo upload; incremental_bytes=%llu\n",(unsigned long long)incrementalBytes);
 }
