@@ -66,23 +66,45 @@ namespace {
     };
     std::atomic<uint64_t> retainedMeshes{0},activeHigh{0},switchHigh{0},gpuRequested{0},gpuHigh{0};
     std::atomic<uint64_t> historyCharge{0},queueHigh{0},canonicalCharge{0},snapshotHigh{0};
-    std::atomic<uint64_t> physicalSlice{0},publishedNodes{0},glNodes{0},candidateNodes{0};
-    bool admits(uint64_t activeMesh,uint64_t samples,uint64_t decoding=0) {
+    std::atomic<uint64_t> physicalSlice{0},sceneOwners{0},candidateNodes{0},liveVboCharge{0};
+    bool admits(uint64_t activeMesh,uint64_t samples,uint64_t decoding=0,uint64_t extraNodes=0) {
         const auto slice=physicalSlice.load(std::memory_order_relaxed);
         if(!slice) return true; // host renderer fixtures have no Android process
         return document::WorkingSet::forSlice(slice).admits(document::Ink::liveBytes.load(),
-                retainedMeshes.load(),publishedNodes.load()+glNodes.load()+candidateNodes.load()+4,
-                activeMesh,samples,decoding);
+                retainedMeshes.load(),sceneOwners.load()+candidateNodes.load()+4+extraNodes,
+                activeMesh,samples,decoding,liveVboCharge.load());
     }
+    // Count allocations, not map sizes sampled at publication boundaries. swap
+    // and node-handle merge transfer ownership without changing this ledger.
+    template<class T> struct SceneAllocator {
+        using value_type=T;
+        SceneAllocator()=default;
+        template<class U> SceneAllocator(const SceneAllocator<U>&) noexcept {}
+        template<class U> bool operator==(const SceneAllocator<U>&) const noexcept {return true;}
+        T* allocate(size_t n) {
+            sceneOwners.fetch_add(n);
+            try {
+                if(!admits(0,0)) throw std::bad_alloc{};
+                return std::allocator<T>{}.allocate(n);
+            } catch(...) {sceneOwners.fetch_sub(n);throw;}
+        }
+        void deallocate(T* p,size_t n) noexcept {
+            std::allocator<T>{}.deallocate(p,n);sceneOwners.fetch_sub(n);
+        }
+    };
     void peak(std::atomic<uint64_t>& counter,uint64_t value) {
         auto prev=counter.load(std::memory_order_relaxed);
         while(prev<value && !counter.compare_exchange_weak(prev,value,std::memory_order_relaxed)) {}
     }
-    struct CompletedGeometry {
-        std::array<Mesh,3> derived;
+    struct GeometryCharge {
         uint64_t bytes=0;
-        ~CompletedGeometry(){retainedMeshes.fetch_sub(bytes,std::memory_order_relaxed);}
+        // One geometry per stroke, one possible cache node. Aliasing GPU source
+        // pointers retain this credit even after its Published nodes disappear.
+        GeometryCharge(){sceneOwners.fetch_add(1);}
+        ~GeometryCharge(){retainedMeshes.fetch_sub(bytes,std::memory_order_relaxed);sceneOwners.fetch_sub(1);}
     };
+    // The base is destroyed AFTER the member vectors finish deallocation.
+    struct CompletedGeometry : GeometryCharge {std::array<Mesh,3> derived;};
 
     struct Trace {
         uint64_t gpuId = 0;
@@ -185,7 +207,7 @@ namespace {
                (t.rawPoints.capacity()+t.cleanPoints.capacity())*sizeof(float)+
                (t.rawMesh.capacity()+t.cleanMesh.capacity()+t.stableMesh.capacity()+t.tailMesh.capacity())*sizeof(Vertex);
     }
-    using Scene=std::map<Key,Published>;
+    using Scene=std::map<Key,Published,std::less<Key>,SceneAllocator<std::pair<const Key,Published>>>;
     Scene finished, pendingScene;
     size_t sceneBytes=0,sceneLimit=SIZE_MAX,canonicalLimit=SIZE_MAX;
     constexpr size_t publicationLimit=65536;
@@ -661,11 +683,17 @@ void main() {
     struct LiveUpload {
         size_t total = 0;
         size_t offset = 0;
+        size_t plannedCapacity = 0;
         uint64_t revision = 0;
         std::vector<Vertex> data;
     };
 
-    LiveUpload snapshotUpload(const Mesh& mesh, uint64_t id, int part, uint64_t revision = 0) {
+    struct FrameGrowth {
+        size_t pending=0;
+        void reserve(size_t n) {pending+=n;liveVboCharge.fetch_add(n);}
+        ~FrameGrowth(){liveVboCharge.fetch_sub(pending);}
+    };
+    LiveUpload snapshotUpload(FrameGrowth& growth,const Mesh& mesh, uint64_t id, int part, uint64_t revision = 0) {
         LiveUpload result;
         result.total = mesh.size();
         result.revision = revision;
@@ -673,6 +701,15 @@ void main() {
         const LiveGpuMesh* previous = gpu == gpuLive.end() ? nullptr : &gpu->second[part];
         const size_t uploaded = previous ? previous->uploadedVertices : 0;
         const size_t capacity = previous ? previous->capacityVertices : 0;
+        if(result.total>capacity) {
+            const size_t n=result.total;
+            const size_t finishRoom=part==2 ? (maxSteps+1)*6+12 : part==3 ? 0 : 12;
+            result.plannedCapacity=std::max(n+std::min(finishRoom,std::max(size_t(12),n/8)),
+                                            std::max(size_t(256),capacity*2));
+            // Reserve under stateMutex while the active admission still owns
+            // this prefix. Cancellation may run immediately after snapshot.
+            growth.reserve((result.plannedCapacity-capacity)*sizeof(Vertex));
+        }
         if (part == 3 && previous && previous->revision == revision && uploaded == result.total)
             return result;
         result.offset = (part == 3 || result.total < uploaded || result.total > capacity)
@@ -682,7 +719,7 @@ void main() {
         return result;
     }
 
-    void drawLive(uint64_t strokeId, int part, const LiveUpload& mesh, float r, float g, float b) {
+    void drawLive(FrameGrowth& frame,uint64_t strokeId, int part, const LiveUpload& mesh, float r, float g, float b) {
         if (mesh.total == 0 || !program) return;
         auto& cached = gpuLive[strokeId][part];
         if (!cached.vbo) glGenBuffers(1, &cached.vbo);
@@ -692,11 +729,10 @@ void main() {
         if (n > cached.capacityVertices) {
             // Leave bounded room for the terminal tail and cursor when a
             // coalesced frame is the first upload of a long live prefix.
-            const size_t finishRoom=part==2 ? (maxSteps+1)*6+12 : part==3 ? 0 : 12;
-            const size_t cap = std::max(n+std::min(finishRoom,std::max(size_t(12),n/8)),
-                                        std::max(size_t(256), cached.capacityVertices * 2));
+            const size_t cap=mesh.plannedCapacity;
             glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(cap * sizeof(Vertex)), nullptr, GL_DYNAMIC_DRAW);
             auto growth=(cap-cached.capacityVertices)*sizeof(Vertex);
+            frame.pending-=growth; // ledger unchanged: GL now owns these bytes
             peak(gpuHigh,gpuRequested.fetch_add(growth)+growth);
             cached.capacityVertices = cap;
             ++liveBufferReallocations;
@@ -711,7 +747,8 @@ void main() {
                 // Includes failed storage allocation. Do not publish a prefix
                 // length for bytes the driver did not accept. Retry from zero.
                 gpuRequested.fetch_sub(cached.capacityVertices*sizeof(Vertex));
-                glDeleteBuffers(1,&cached.vbo); cached={}; return;
+                glDeleteBuffers(1,&cached.vbo);
+                liveVboCharge.fetch_sub(cached.capacityVertices*sizeof(Vertex)); cached={}; return;
             }
         }
         cached.uploadedVertices = n;
@@ -719,12 +756,21 @@ void main() {
         drawCached(cached.vbo, (GLsizei)n, r, g, b);
     }
 
+    void eraseGpuNode(decltype(gpuFinished)::iterator it) {
+        // All three sources alias one geometry. Keep its cache-node credit
+        // alive through map-node deallocation, even for the final GL owner.
+        auto pin=std::move(it->second.source[0]);
+        gpuFinished.erase(it);
+    }
     void deleteGpuCache() {
-        for (auto& [id,item] : gpuFinished)
+        while(!gpuFinished.empty()) {
+            auto it=gpuFinished.begin();
+            auto& item=it->second;
             for(size_t i=0;i<3;i++) if(item.vbo[i]) {
                 gpuRequested.fetch_sub(item.storage[i]);glDeleteBuffers(1,&item.vbo[i]);
             }
-        gpuFinished.clear();
+            eraseGpuNode(it);
+        }
     }
 
     void cacheFinished(Key id,const Published& patch) {
@@ -736,7 +782,7 @@ void main() {
             for(size_t i=0;i<3;i++) if(it->second.vbo[i]) {
                 gpuRequested.fetch_sub(it->second.storage[i]);glDeleteBuffers(1,&it->second.vbo[i]);
             }
-            if(!patch.shape) {gpuFinished.erase(it); return;}
+            if(!patch.shape) {eraseGpuNode(it); return;}
             it->second=CachedGpuStroke{};
         }
         if(!patch.shape) return;
@@ -759,6 +805,8 @@ void main() {
                 // Never adopt provisional part 3; its contents are replaceable.
                 completed.vbo[i]=std::exchange(prefix.vbo,0);
                 completed.storage[i]=prefix.capacityVertices*sizeof(Vertex);
+                // Completed geometry already reserves the adopted VBO capacity.
+                liveVboCharge.fetch_sub(completed.storage[i]);
                 completed.count[i]=(GLsizei)prefix.uploadedVertices;
             }
         }
@@ -841,7 +889,7 @@ struct SceneSink final : document::Observer {
                 if(s!=document::Status::Ok) return s;
             }
             finished.swap(retired);pendingScene.swap(unused);
-            ++finishedEpoch;sceneHead=0;sceneBytes=0;publishedNodes.store(0);
+            ++finishedEpoch;sceneHead=0;sceneBytes=0;
             return document::Status::Ok;
         }
         if(appended && touched.size()==1 && appendNodes.count(touched.front().id) &&
@@ -859,7 +907,6 @@ struct SceneSink final : document::Observer {
                 pendingScene.erase(prev);
             }
             finished.merge(appendNodes);pendingScene.merge(appendPatch);
-            publishedNodes.store(finished.size()+pendingScene.size());
             sceneHead=doc.first();sceneBytes+=appendedBytes;
             return document::Status::Ok;
         }
@@ -912,7 +959,6 @@ struct SceneSink final : document::Observer {
         pendingScene.merge(notifications);
         sceneHead=doc.first();
         sceneBytes=projected;
-        publishedNodes.store(finished.size()+pendingScene.size());
         return document::Status::Ok;
     }
 };
@@ -1491,6 +1537,7 @@ Java_com_infinipaint_demo_NativeBridge_contextCreated(JNIEnv*, jclass) {
     gpuRequested.store(0);
     for(auto& [id,item]:gpuFinished) {item.vbo={};item.count={};item.storage={};}
     gpuLive.clear();
+    liveVboCharge.store(0); // GL thread, no outstanding snapshot across EGL contexts
     program = 0;
     buffer = 0;
 
@@ -1672,6 +1719,7 @@ Java_com_infinipaint_demo_NativeBridge_render(
     }
 
     Scene newCompleted;
+    FrameGrowth growth;
     Key frameHead=0;
     uint64_t frameEpoch = 0;
     std::vector<std::pair<uint64_t, ViewTrace>> active;
@@ -1694,7 +1742,6 @@ Java_com_infinipaint_demo_NativeBridge_render(
         // Epoch mismatch means clear; GL thread will retire old cache below.
         if(program && buffer) {
             newCompleted.swap(pendingScene);
-            publishedNodes.store(finished.size());
         }
         frameHead=sceneHead;
 
@@ -1709,12 +1756,12 @@ Java_com_infinipaint_demo_NativeBridge_render(
             view.radiusWorld = trace.rawPeak;
             view.filteredRadius = trace.cleanPeak;
             if (mode == 0 || mode == 3)
-                view.raw = snapshotUpload(trace.rawMesh, trace.gpuId, 0);
+                view.raw = snapshotUpload(growth,trace.rawMesh, trace.gpuId, 0);
             if (mode == 1 || mode == 3)
-                view.clean = snapshotUpload(trace.cleanMesh, trace.gpuId, 1);
+                view.clean = snapshotUpload(growth,trace.cleanMesh, trace.gpuId, 1);
             if (mode == 2 || mode == 3) {
-                view.stable = snapshotUpload(trace.stableMesh, trace.gpuId, 2);
-                view.tail = snapshotUpload(trace.tailMesh, trace.gpuId, 3, trace.tailRevision);
+                view.stable = snapshotUpload(growth,trace.stableMesh, trace.gpuId, 2);
+                view.tail = snapshotUpload(growth,trace.tailMesh, trace.gpuId, 3, trace.tailRevision);
             }
             if (trace.cleanPoints.size() >= 2) {
                 view.filteredX = trace.cleanPoints[trace.cleanPoints.size()-2];
@@ -1790,7 +1837,6 @@ Java_com_infinipaint_demo_NativeBridge_render(
         // This frame already captured the full replacement snapshot.
     }
     for (const auto& [id,patch] : newCompleted) cacheFinished(id,patch);
-    glNodes.store(gpuFinished.size());
     for (const auto& [id,patch] : newCompleted) if(patch.shape) {
         auto& node=gpuFinished.at(id);
         node.following=node.next?&gpuFinished.at(node.next):nullptr;
@@ -1827,6 +1873,7 @@ Java_com_infinipaint_demo_NativeBridge_render(
         if (!present) {
             for (auto& part : it->second) if (part.vbo) {
                 gpuRequested.fetch_sub(part.capacityVertices*sizeof(Vertex));glDeleteBuffers(1,&part.vbo);
+                liveVboCharge.fetch_sub(part.capacityVertices*sizeof(Vertex));
             }
             it = gpuLive.erase(it);
         } else ++it;
@@ -1850,20 +1897,20 @@ Java_com_infinipaint_demo_NativeBridge_render(
         };
         if(mode==2 || mode==3) {
             coverageLayer(trace.bounds,framePanX,framePanY,frameZoom,.28f,.58f,1.f,[&]{
-            drawLive(strokeId,2,trace.stable,.28f,.58f,1.f);
-            drawLive(strokeId,3,trace.tail,.28f,.58f,1.f);
+            drawLive(growth,strokeId,2,trace.stable,.28f,.58f,1.f);
+            drawLive(growth,strokeId,3,trace.tail,.28f,.58f,1.f);
             tip(true,.28f,.58f,1.f);
             });
         }
         if(mode==1 || mode==3) {
             coverageLayer(trace.bounds,framePanX,framePanY,frameZoom,1.f,.76f,.20f,[&]{
-            drawLive(strokeId,1,trace.clean,1.f,.76f,.20f);
+            drawLive(growth,strokeId,1,trace.clean,1.f,.76f,.20f);
             tip(true,1.f,.76f,.20f);
             });
         }
         if(mode==0 || mode==3) {
             coverageLayer(trace.bounds,framePanX,framePanY,frameZoom,.20f,.95f,.78f,[&]{
-            drawLive(strokeId,0,trace.raw,.20f,.95f,.78f);
+            drawLive(growth,strokeId,0,trace.raw,.20f,.95f,.78f);
             tip(false,.20f,.95f,.78f);
             });
         }
@@ -1944,6 +1991,10 @@ Java_com_infinipaint_demo_NativeBridge_render(
 } // extern "C"
 
 namespace engine::tablet {
+#ifndef __ANDROID__
+std::array<uint64_t,2> hostOwnerCharges(){return {sceneOwners.load(),liveVboCharge.load()};}
+const void* hostFirstRetiringMesh(){return gpuFinished.begin()->second.source[2]->data();}
+#endif
 void setPhysicalSlice(size_t bytes) {physicalSlice.store(bytes);}
 bool admitIncoming(size_t count,size_t bytes) {
     candidateNodes.store(count);
@@ -1973,6 +2024,7 @@ bool stage(std::unique_ptr<document::Document> candidate,size_t meshBudget) {
         if(!live.empty() || saves.size() || (model && !suspended)) return false;
     }
     stagedBytes=stagedLimit-meshBudget;
+    if(!admits(0,0,0,replacement.size())) return false;
     stagedPublication=replacement; // worker only, all allocations before db.select
     stagedScene.swap(replacement);stagedModel.swap(candidate);
     return true;
@@ -1987,7 +2039,6 @@ void activate(double x,double y,double zoom) noexcept {
         pendingScene.swap(stagedPublication);
         sceneHead=model->first();
         sceneBytes=stagedBytes;sceneLimit=stagedLimit;canonicalLimit=stagedCanonicalLimit;
-        publishedNodes.store(finished.size()+pendingScene.size());
         cameraPanX=x;cameraPanY=y;cameraZoom=zoom;
         ++finishedEpoch; persistent=true;
         model->observe(&sceneSink);

@@ -13,7 +13,12 @@
 #include <vector>
 #include <cstring>
 #include <new>
+#include <functional>
 #include "tablet/session.hpp"
+namespace engine::tablet {std::array<uint64_t,2> hostOwnerCharges();const void* hostFirstRetiringMesh();}
+static std::function<void()> parkedDraw,parkedSnapshot;
+static const void* watchedFree=nullptr;
+static std::function<void()> beforeFree;
 
 // Single-threaded fault injection. Trigger exactly one scalar allocation.
 static int failAfter=-1;
@@ -22,8 +27,12 @@ void* operator new(size_t n) {
     if(auto* p=std::malloc(n?n:1)) return p;
     throw std::bad_alloc{};
 }
-[[gnu::noinline]] void operator delete(void* p) noexcept {std::free(p);}
-[[gnu::noinline]] void operator delete(void* p,size_t) noexcept {std::free(p);}
+static void release(void* p) noexcept {
+    if(p && p==watchedFree){watchedFree=nullptr;beforeFree();}
+    std::free(p);
+}
+[[gnu::noinline]] void operator delete(void* p) noexcept {release(p);}
+[[gnu::noinline]] void operator delete(void* p,size_t) noexcept {release(p);}
 
 extern "C" {
 void Java_com_infinipaint_demo_NativeBridge_contextCreated(JNIEnv*,jclass);
@@ -117,6 +126,7 @@ void glVertexAttribPointer(GLuint,GLint,GLenum,GLboolean,GLsizei s,const void*) 
 void glEnableVertexAttribArray(GLuint) {}
 static unsigned resolves=0;
 void glDrawArrays(GLenum,GLint,GLsizei n) {
+    if(parkedDraw) {auto once=std::exchange(parkedDraw,{});once();}
     if(!boundBuffer) {++resolves;return;}
     ++draws;lastDrawBuffer=boundBuffer;usedBytes=size_t(n)*stride;
 }
@@ -132,7 +142,10 @@ const unsigned char* glGetString(GLenum id) {
 void glGetIntegerv(GLenum,GLint* value){*value=8;}
 GLenum glGetError(){++errorChecks;GLenum result=uploadError;uploadError=GL_NO_ERROR;return result;}
 void glClearColor(GLfloat,GLfloat,GLfloat,GLfloat) {}
-void glClear(GLbitfield) {if(scissored){++maskClears;clearedPixels+=scissorPixels;}}
+void glClear(GLbitfield) {
+    if(parkedSnapshot) {auto once=std::exchange(parkedSnapshot,{});once();}
+    if(scissored){++maskClears;clearedPixels+=scissorPixels;}
+}
 void glEnable(GLenum cap) {if(cap==GL_SCISSOR_TEST)scissored=true;}
 void glBlendFunc(GLenum,GLenum) {}
 }
@@ -144,6 +157,99 @@ int main(int argc,char** argv){
     auto sample=[](int n,double timestamp){return Java_com_infinipaint_demo_NativeBridge_sample(nullptr,nullptr,1,
         100+3*n,250+25*std::sin(n*0.13),timestamp,0.6f,0,0)==JNI_TRUE;};
     auto resize=[](int w,int h){Java_com_infinipaint_demo_NativeBridge_resizeViewport(nullptr,nullptr,w,h);};
+    if(argc>1 && std::string_view(argv[1])=="owners") {
+        using namespace engine::tablet;
+        using namespace engine::document;
+        constexpr size_t mib=1u<<20,n=64;
+        auto stageDots=[&](uint8_t uuid,size_t slice) {
+            setPhysicalSlice(slice);
+            if(!admitIncoming(n,0)) return false;
+            auto d=std::make_unique<Document>(Uuid{uuid});
+            for(size_t i=0;i<n;++i) {
+                engine::input::RawInputStroke raw{{{20,20},1,1,0,0}};
+                check(d->restore(i+1,i,{std::make_shared<const Ink>(std::move(raw),Brush{})},1,1,1,n)==Status::Ok,"dot restore");
+            }
+            check(d->finishRestore(1,n)==Status::Ok && d->grant(n+1,n+65536),"dot range");
+            try{return stage(std::move(d),slice/3);}catch(const std::bad_alloc&){return false;}
+        };
+        Java_com_infinipaint_demo_NativeBridge_contextCreated(nullptr,nullptr);resize(1200,800);
+        Java_com_infinipaint_demo_NativeBridge_suspend(nullptr,nullptr,true);
+        check(stageDots(1,256*mib),"stage A");
+        check(hostOwnerCharges()[0]==3*n,"two candidate maps plus geometry/cache credits");
+        activate(0,0,1);discard();
+        size_t nearLimit=0;
+        parkedDraw=[&] {
+            // GL has populated its cache but still holds the whole local patch.
+            check(hostOwnerCharges()[0]==3*n,"GL-held patch retained after cache insertion");
+            size_t lo=1,hi=256*mib;
+            while(hi-lo>1) {
+                const size_t mid=(hi+lo)/2;
+                bool ok=stageDots(2,mid);discard();
+                if(ok) hi=mid;else lo=mid;
+            }
+            nearLimit=lo;
+            check(!stageDots(2,nearLimit),"near-limit candidate rejected with GL parked");discard();
+            check(hostOwnerCharges()[0]==3*n,"rejected stage unwound; outgoing scene intact");
+        };
+        render(2);
+        check(nearLimit && hostOwnerCharges()[0]==2*n,"frame exit retired only patch nodes");
+        check(stageDots(2,nearLimit),"same switch fits after GL releases patch");
+        check(hostOwnerCharges()[0]==5*n,"staged clone charged beside outgoing scene");
+        activate(0,0,1);discard();
+        setPhysicalSlice(256*mib);
+        auto headroom=[] {
+            size_t lo=0,hi=1024u<<20;
+            while(hi-lo>1){size_t mid=(hi+lo)/2;if(admitIncoming(0,mid)) lo=mid;else hi=mid;}
+            return lo;
+        };
+        const auto beforeRetire=headroom();
+        watchedFree=hostFirstRetiringMesh();
+        check(watchedFree,"watch nonempty outgoing spline allocation");
+        beforeFree=[&] {check(!admitIncoming(0,beforeRetire+1),"outgoing bytes still charged immediately before free");};
+        render(2);
+        check(!watchedFree && headroom()>beforeRetire,"retirement releases capacity only after vector deallocation");
+        check(hostOwnerCharges()[0]==2*n,"old cache retired");
+        setPhysicalSlice(256*mib);
+        Java_com_infinipaint_demo_NativeBridge_suspend(nullptr,nullptr,false);
+        check(Java_com_infinipaint_demo_NativeBridge_begin(nullptr,nullptr,1,2),"live begin");
+        for(int i=0;i<128;++i) check(sample(i,1+i*.01),"live sample");
+        uint64_t held=0;size_t room=0;
+        parkedSnapshot=[&] {
+            held=hostOwnerCharges()[1];check(held>0,"snapshot reserved pending live VBO growth");
+            Java_com_infinipaint_demo_NativeBridge_cancel(nullptr,nullptr,1);
+            check(hostOwnerCharges()[1]==held,"cancel before GL upload kept reservation");
+            size_t lo=0,hi=1024*mib;
+            while(hi-lo>1){size_t mid=(hi+lo)/2;if(admitIncoming(0,mid)) lo=mid;else hi=mid;}
+            room=lo;
+        };
+        render(3);
+        check(held && hostOwnerCharges()[1]==held && !admitIncoming(0,room+1),"canceled uploaded VBOs block admission");
+        render(3);
+        check(hostOwnerCharges()[1]==0 && admitIncoming(0,room+held) && !admitIncoming(0,room+held+1),
+                "exact canceled VBO capacity released at GL deletion");
+        auto livePrefix=[&] {
+            check(Java_com_infinipaint_demo_NativeBridge_begin(nullptr,nullptr,1,2),"begin live prefix");
+            for(int i=0;i<128;++i) check(sample(i,1+i*.01),"prefix sample");
+        };
+        livePrefix();
+        failUpload=true;render(0);
+        check(!failUpload && hostOwnerCharges()[1]==0,"failed upload releases reservation and invalid buffer");
+        render(0);
+        auto uploaded=hostOwnerCharges()[1];
+        check(uploaded>0,"retry owns uploaded capacity");
+        Java_com_infinipaint_demo_NativeBridge_cancel(nullptr,nullptr,1);
+        check(hostOwnerCharges()[1]==uploaded,"cancel after upload did not release GL charge");
+        auto deletes=deletedObjects;
+        Java_com_infinipaint_demo_NativeBridge_contextCreated(nullptr,nullptr);
+        check(hostOwnerCharges()[1]==0 && deletedObjects==deletes,"context loss forgets canceled bytes without deleting stale names");
+        livePrefix();render(2);
+        check(hostOwnerCharges()[1]>0 && Java_com_infinipaint_demo_NativeBridge_end(nullptr,nullptr,1),"seal uploaded live prefix");
+        render(2);
+        check(hostOwnerCharges()[1]==0,"completed cache adoption and tail retirement release live charge");
+        std::printf("PASS parked GL switch rejected at slice=%zu; identical retry fits after %zu patch nodes retire; cancel retained/released %llu live VBO bytes\n",
+                nearLimit,n,(unsigned long long)held);
+        return 0;
+    }
     if(argc>1) {
         using clock=std::chrono::steady_clock;
         bool queue=std::string_view(argv[1])=="bench-queue";

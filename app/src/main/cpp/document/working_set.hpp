@@ -16,7 +16,7 @@ struct WorkingSet {
         return {3*r,(160ull<<20)+r/3+(2ull<<20)};
     }
     bool admits(uint64_t canonicalPayload,uint64_t completedMeshes,uint64_t nodes,
-                uint64_t activeMesh,uint64_t activeSamples,uint64_t decoding=0) const noexcept {
+                uint64_t activeMesh,uint64_t activeSamples,uint64_t decoding=0,uint64_t liveVbos=0) const noexcept {
         if(!limit || reserved>limit) return false;
         uint64_t room=limit-reserved;
         auto charge=[&](uint64_t n,uint64_t unit) {
@@ -30,7 +30,7 @@ struct WorkingSet {
         // live GPU growth and index/filter/spline staging.
         return charge(canonicalPayload,1) && charge(completedMeshes,3) &&
                charge(nodes,1024) && charge(activeMesh,5) && charge(activeSamples,640) &&
-               charge(decoding,1);
+               charge(decoding,1) && charge(liveVbos,1);
     }
 };
 }
