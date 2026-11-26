@@ -9,6 +9,8 @@ Tested source `d8a804a15e2e123cca26eec6ef54854e4fada3b0`. `aapt dump badging` ve
 
 `captures/m03-gate-regression.txt`: Mesa 26.0.3 llvmpipe GLES2, same-branch parity zero in both coverage branches. Cross-branch diagonal taper maximum delta 8/255, not a same-branch mismatch. Mock path reported zero unrelated undo upload.
 
+**Post-build specialist review — P1 memory admission blocker.** Read-only review at documentation HEAD `901c9b572677f95ff761d97714b793822b48162e`, relative to `8195bdef36c62efb79a794ed801c4405f607d4f7`, found that `native_bridge.cpp` counts the staged replacement once before cloning its publication map, stops counting a patch when GL takes `newCompleted` rather than when GL releases it, and does not charge canceled live VBOs until retirement. At a modeled 256 MiB slice a switch between two 36k-dot documents with GL parked can appear to fit (~515 MiB vs ~521 MiB available) despite missing owners. Static counterexample, not a device OOM or data-loss observation. No new Clear rollback/publication defect found. Do not use this APK as evidence that the aggregate bound holds. Before physical stress or acceptance, track charges through ownership transfers and retirement, and test parked GL, near-limit switch/rejection and canceled VBOs; rerun affected checks and identify replacement artifacts.
+
 |Gate|Evidence and limits|
 |---|---|
 |Editing, codec and rollback|`captures/m03-gate-core.txt`: seeded 10,000-step ordered oracle, budget/ticket checks, queue saturation/retry, seven injected allocation failures. Host coverage, not persistence evidence.|
