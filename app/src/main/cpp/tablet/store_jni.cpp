@@ -46,8 +46,10 @@ Uuid uuid(jlong hi,jlong lo) {
 }
 #define STORE(name) Java_com_infinipaint_storage_StorePort_##name
 extern "C" {
-JNIEXPORT void JNICALL STORE(begin)(JNIEnv* e,jclass,jlong hi,jlong lo,jlong rev,jlong high,jlong count) {
+JNIEXPORT void JNICALL STORE(begin)(JNIEnv* e,jclass,jlong hi,jlong lo,jlong rev,jlong high,jlong count,jlong slice) {
     guarded(e,[&]{require(rev>=0 && high>=0 && count>=0 && uint64_t(count)<=SIZE_MAX);
+        require(slice>0 && slice<=(jlong(384)<<20));tablet::setPhysicalSlice(size_t(slice));
+        require(tablet::admitIncoming(size_t(count),0));
         candidate=std::make_unique<Document>(uuid(hi,lo)); incoming.reset();
         revision=rev;ceiling=high;expected=size_t(count);return true;});
 }
@@ -55,6 +57,7 @@ JNIEXPORT void JNICALL STORE(stroke)(JNIEnv* e,jclass,jlong id,jlong prev,jlong 
     guarded(e,[&]{require(candidate && !incoming && count>0 && count<=1000000 && header &&
                            e->GetArrayLength(header)==wire::headerBytes);
         auto s=std::make_unique<Incoming>(); wire::Header h;
+        require(tablet::admitIncoming(expected,size_t(count)*sizeof(input::RawInputPoint)));
         e->GetByteArrayRegion(header,0,h.size(),reinterpret_cast<jbyte*>(h.data()));
         require(!e->ExceptionCheck() && wire::readHeader(h,s->brush,s->dx,s->dy));
         s->id=id;s->prev=prev;s->content=content;s->geometry=geometry;s->used=0;

@@ -120,7 +120,7 @@ public final class EditorStore {
         try {
             db.load(target,resident/512,resident/8,new DocumentDatabase.Restore() {
                 public void begin(UUID doc,long r,long ceiling,long count) {
-                    rev[0]=r;StorePort.begin(doc.getMostSignificantBits(),doc.getLeastSignificantBits(),r,ceiling,count);
+                    rev[0]=r;StorePort.begin(doc.getMostSignificantBits(),doc.getLeastSignificantBits(),r,ceiling,count,resident);
                 }
                 public void stroke(long id,long prev,long next,long cr,long gr,int n,byte[] h) {
                     StorePort.stroke(id,prev,cr,gr,n,h);
@@ -146,6 +146,7 @@ public final class EditorStore {
     static void persist(DocumentDatabase db,UUID current,UUID token,long[] g) {
         final int count=Math.toIntExact(g[4]);
         db.commit(current,token,g[0],g[1],g[2],g[3],w->{
+                if(g[3]==0) {w.clear();return;}
                 HashMap<Long,long[]> inserts=new HashMap<>();
                 for(int i=0;i<count;i++) {
                     long[] row=StorePort.row(i);

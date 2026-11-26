@@ -4,7 +4,7 @@ package com.infinipaint.storage;
 final class StorePort {
     static {System.loadLibrary("ip_tablet");}
     private StorePort() {}
-    static native void begin(long hi,long lo,long revision,long ceiling,long count);
+    static native void begin(long hi,long lo,long revision,long ceiling,long count,long physicalSlice);
     static native void stroke(long id,long prev,long content,long geometry,int samples,byte[] header);
     static native void chunk(byte[] data);
     static native void endStroke();

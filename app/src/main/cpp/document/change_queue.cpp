@@ -19,6 +19,14 @@ Status ChangeQueue::prepare(const Document& doc,std::span<const Touched> touched
     const bool usingReservation=committing_ && reservation_;
     if(count_+(reservation_ && !usingReservation)>=slots) return Status::QueueLimit;
     size_t available=limit_-charged_-(usingReservation?0:reservation_);
+    if(!doc.size() && !touched.empty()) {
+        const auto bytes=sizeof(ChangeSet)+128;
+        if(bytes>available) return Status::QueueLimit;
+        auto g=std::make_shared<ChangeSet>();
+        g->document=doc.identity();g->base=doc.revision();g->head=g->tail=0;g->count=0;g->charge=bytes;
+        queue_[(head_+count_)%slots]=std::move(g);charged_+=bytes;++count_;
+        return Status::Ok;
+    }
     if(usingReservation && touched.size()==1 && touched[0].next==0 && doc.last()==touched[0].id) {
         const auto& t=touched[0];const Record* row=doc.find(t.id);
         if(!row || row->prev!=t.prev) return Status::Invalid;

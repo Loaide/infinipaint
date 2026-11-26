@@ -6,8 +6,12 @@ Use a named spare device/emulator first for instrumentation, then the owner's SM
 2. **After explicit authorization** install only those two APKs on the named test device. Do not use `connectedAndroidTest` against a collection of attached devices; specify `adb -s SERIAL`. Do not clear either package. Record the instrumentation output (including failures/skips) and `IP_M03_SQL` / `IP_M03_MEMORY` logs:
 
    ```text
+   adb -s SERIAL install app/build/outputs/apk/m03Verify/app-m03Verify.apk
+   adb -s SERIAL install app/build/outputs/apk/androidTest/m03Verify/app-m03Verify-androidTest.apk
    adb -s SERIAL shell am instrument -w -r -e m03Scale true com.infinipaint.demo.m03verify.test/androidx.test.runner.AndroidJUnitRunner
    ```
+
+   These installation commands are for a **fresh, authorized** verification environment. If already installed, stop rather than uninstalling or replacing anything. For the separately authorized physical session, launch `adb -s SERIAL shell am start -n com.infinipaint.demo.m03verify/com.infinipaint.demo.MainActivity` and follow steps 3–8.
 
    The tests use unique cache files. Recovery tests kill **only** a private `:recovery_probe` child, after the runner witnesses a specified boundary. Require old revision before write and during chunk insertion, new revision after SQL commit and after acknowledgement, with complete identity/order and payload. A normal close/reopen is not a process-death test. Preserve failing fixtures; do not “fix” failures by clearing data.
 3. **Functional ink:** launch only the verification app, create a new document A from **Document**. Draw a dot, long curved line, stationary pressure change, pressure ramp and rapid tied-position sequence; try Light/Medium/Strong, Raw/One-Euro/Spline/Compare. Pan/pinch and return. Existing widths must scale with the drawing, not the screen. Compare M02 caps/joins, no lift jump or doubled tail. Capture screenshots and `IP_PEN_UP` windows.

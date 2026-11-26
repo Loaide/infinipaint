@@ -1,6 +1,7 @@
 #include "document/codec.hpp"
 #include "document/change_queue.hpp"
 #include "document/eraser.hpp"
+#include "document/working_set.hpp"
 #include <cassert>
 #include <cstdio>
 #include <random>
@@ -170,6 +171,12 @@ void tickets() {
 }
 }
 int main() {
+    constexpr uint64_t mib=1ull<<20;
+    auto b=WorkingSet::forSlice(256*mib); // model 4 GiB physical
+    assert(b.admits(8*mib,40*mib,10000,24*mib,41633));
+    assert(!b.admits(8*mib,140*mib,10000,24*mib,41633)); // delayed GL + staged scene
+    assert(!b.admits(8*mib,40*mib,UINT64_MAX,0,0));
+    assert(!b.admits(8*mib,40*mib,1000,1,1,UINT64_MAX));
     codec(); edits(); oracle(); saturation(); clipping();contentAndLimits();tickets();
     std::puts("PASS M03 v1 codec, reversible splices, history, ID ranges, seeded 10000-step ordered oracle, queue reserve/saturation/retry");
 }

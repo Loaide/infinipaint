@@ -23,6 +23,7 @@
 #include "document/change_queue.hpp"
 #include "document/codec.hpp"
 #include "document/eraser.hpp"
+#include "document/working_set.hpp"
 #include "tablet/session.hpp"
 #include <cstring>
 #include "stroke/spline.hpp"
@@ -65,6 +66,14 @@ namespace {
     };
     std::atomic<uint64_t> retainedMeshes{0},activeHigh{0},switchHigh{0},gpuRequested{0},gpuHigh{0};
     std::atomic<uint64_t> historyCharge{0},queueHigh{0},canonicalCharge{0},snapshotHigh{0};
+    std::atomic<uint64_t> physicalSlice{0},publishedNodes{0},glNodes{0},candidateNodes{0};
+    bool admits(uint64_t activeMesh,uint64_t samples,uint64_t decoding=0) {
+        const auto slice=physicalSlice.load(std::memory_order_relaxed);
+        if(!slice) return true; // host renderer fixtures have no Android process
+        return document::WorkingSet::forSlice(slice).admits(document::Ink::liveBytes.load(),
+                retainedMeshes.load(),publishedNodes.load()+glNodes.load()+candidateNodes.load()+4,
+                activeMesh,samples,decoding);
+    }
     void peak(std::atomic<uint64_t>& counter,uint64_t value) {
         auto prev=counter.load(std::memory_order_relaxed);
         while(prev<value && !counter.compare_exchange_weak(prev,value,std::memory_order_relaxed)) {}
@@ -517,8 +526,9 @@ void main() {
                 auto capacity=[](const Mesh& m,size_t extra) -> uint64_t {
                     return m.capacity()-m.size()>=extra?m.capacity():m.size()+std::max(extra,m.size());
                 };
-                if(capacity(t.rawMesh,18)+capacity(t.cleanMesh,24)+capacity(t.stableMesh,stableExtra)>
-                        t.meshAllowance/sizeof(Vertex))
+                uint64_t vertices=capacity(t.rawMesh,18)+capacity(t.cleanMesh,24)+capacity(t.stableMesh,stableExtra);
+                if(vertices>t.meshAllowance/sizeof(Vertex) ||
+                   !admits(vertices*sizeof(Vertex),t.input.raw_samples().size()+1))
                     return core::Error{core::ErrorCode::ResourceLimit,"Document geometry budget"};
             }
             reserveExtra(t.rawPoints,2); reserveExtra(t.cleanPoints,2);
@@ -822,6 +832,18 @@ struct SceneSink final : document::Observer {
     document::Status prepare(const document::Document& doc,std::span<const document::Touched> touched) override {
         Scene stage;
         if(doc.canonicalBytes()>canonicalLimit) return document::Status::Memory;
+        if(!doc.size()) {
+            Scene retired,unused;
+            std::unique_lock lock(stateMutex,std::defer_lock);
+            if(worker) lock.lock();
+            if(persistent) {
+                auto s=saves.prepare(doc,touched);
+                if(s!=document::Status::Ok) return s;
+            }
+            finished.swap(retired);pendingScene.swap(unused);
+            ++finishedEpoch;sceneHead=0;sceneBytes=0;publishedNodes.store(0);
+            return document::Status::Ok;
+        }
         if(appended && touched.size()==1 && appendNodes.count(touched.front().id) &&
            appendPatch.count(touched.front().id) && (!touched.front().prev || appendPatch.count(touched.front().prev))) {
             const auto [id,prev,next,geometryChanged]=touched.front();
@@ -837,6 +859,7 @@ struct SceneSink final : document::Observer {
                 pendingScene.erase(prev);
             }
             finished.merge(appendNodes);pendingScene.merge(appendPatch);
+            publishedNodes.store(finished.size()+pendingScene.size());
             sceneHead=doc.first();sceneBytes+=appendedBytes;
             return document::Status::Ok;
         }
@@ -889,6 +912,7 @@ struct SceneSink final : document::Observer {
         pendingScene.merge(notifications);
         sceneHead=doc.first();
         sceneBytes=projected;
+        publishedNodes.store(finished.size()+pendingScene.size());
         return document::Status::Ok;
     }
 };
@@ -976,7 +1000,8 @@ Java_com_infinipaint_demo_NativeBridge_begin(
     try {
         if(!readyModel() || suspended || !model->canAllocate() || live.count(id) ||
            (persistent && (pendingScene.size()+2>publicationLimit ||
-                           model->canonicalBytes()+1024>canonicalLimit))) return JNI_FALSE;
+                           model->canonicalBytes()+1024>canonicalLimit || sceneLimit-sceneBytes<54*sizeof(Vertex) ||
+                           !admits(54*sizeof(Vertex),1)))) return JNI_FALSE;
         auto trace=std::make_unique<Trace>(std::move(inputProcessor.value()),std::move(fitter.value()));
         trace->strokeRadiusWorld = (float)(1.9 / cameraZoom);
         trace->meshAllowance=sceneLimit-sceneBytes;
@@ -1035,6 +1060,9 @@ Java_com_infinipaint_demo_NativeBridge_sample(
         size_t capacity=raw.capacity();
         if(raw.size()==capacity) capacity=std::min<size_t>(1000000,std::max<size_t>(1,capacity*2));
         const auto bytes=capacity*sizeof(input::RawInputPoint);
+        if(raw.size()==raw.capacity() &&
+           !admits((trace.rawMesh.capacity()+trace.cleanMesh.capacity()+trace.stableMesh.capacity())*sizeof(Vertex),
+                   raw.size()+1)) return JNI_FALSE;
         if(!model->acceptsStrokeCapacity(capacity) || model->canonicalBytes()+bytes+1024>canonicalLimit ||
            !saves.growStroke(bytes)) return JNI_FALSE;
     }
@@ -1664,7 +1692,10 @@ Java_com_infinipaint_demo_NativeBridge_render(
 
         frameEpoch = finishedEpoch;
         // Epoch mismatch means clear; GL thread will retire old cache below.
-        if(program && buffer) newCompleted.swap(pendingScene);
+        if(program && buffer) {
+            newCompleted.swap(pendingScene);
+            publishedNodes.store(finished.size());
+        }
         frameHead=sceneHead;
 
         active.reserve(live.size());
@@ -1759,6 +1790,7 @@ Java_com_infinipaint_demo_NativeBridge_render(
         // This frame already captured the full replacement snapshot.
     }
     for (const auto& [id,patch] : newCompleted) cacheFinished(id,patch);
+    glNodes.store(gpuFinished.size());
     for (const auto& [id,patch] : newCompleted) if(patch.shape) {
         auto& node=gpuFinished.at(id);
         node.following=node.next?&gpuFinished.at(node.next):nullptr;
@@ -1912,6 +1944,11 @@ Java_com_infinipaint_demo_NativeBridge_render(
 } // extern "C"
 
 namespace engine::tablet {
+void setPhysicalSlice(size_t bytes) {physicalSlice.store(bytes);}
+bool admitIncoming(size_t count,size_t bytes) {
+    candidateNodes.store(count);
+    return admits(0,0,bytes);
+}
 static Scene stagedScene,stagedPublication;
 static size_t stagedBytes,stagedLimit,stagedCanonicalLimit;
 static std::unique_ptr<document::Document> stagedModel;
@@ -1950,6 +1987,7 @@ void activate(double x,double y,double zoom) noexcept {
         pendingScene.swap(stagedPublication);
         sceneHead=model->first();
         sceneBytes=stagedBytes;sceneLimit=stagedLimit;canonicalLimit=stagedCanonicalLimit;
+        publishedNodes.store(finished.size()+pendingScene.size());
         cameraPanX=x;cameraPanY=y;cameraZoom=zoom;
         ++finishedEpoch; persistent=true;
         model->observe(&sceneSink);
@@ -1957,7 +1995,7 @@ void activate(double x,double y,double zoom) noexcept {
         historyCharge.store(0);canonicalCharge.store(model->canonicalBytes());
     }
 }
-void discard() noexcept {stagedScene.clear();stagedPublication.clear();stagedModel.reset();}
+void discard() noexcept {stagedScene.clear();stagedPublication.clear();stagedModel.reset();candidateNodes.store(0);}
 std::shared_ptr<const document::ChangeSet> nextSave() {
     std::lock_guard guard(stateMutex); return saves.front();
 }

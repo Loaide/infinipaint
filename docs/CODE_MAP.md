@@ -9,7 +9,7 @@
 |Frame requests and callback accounting|`demo/FrameTelemetry.java`, `MainActivity.dump`|`FrameTelemetryTest.java`, [frame-capture commands](M01_FRAME_CAPTURE.md)|
 |Build/CI and engineering workflow|Gradle wrapper, `.github/workflows/android.yml`, `scripts/engineering.ps1`, `opencode.json`, `.opencode/agents/`|[Workflow commands and activation](W01_WORKFLOW.md)|
 
-There is no durable document store or production spatial index in this baseline. See [decisions](DECISIONS.md) before changing architectural boundaries.
+The M02 baseline had no durable document store. M03 adds the store below; a production spatial index remains M04 work.
 
 M02: `native_bridge.cpp` owns sample preflight, capture-zoom tessellation, tapered capsule shaders and completed geometry publication. `stroke/spline.{cpp,hpp}` holds the ordered attribute history, cached Hermite coefficients and interpolation-error bound. `FrameTelemetry` exposes recent timing distributions only on dump. Start validation at `diagnostics/run_m02.sh` (input/faults/scaling, mock bridge and real Mesa pbuffer); see [tablet gate](M02_TABLET.md).
 
@@ -20,3 +20,5 @@ contains `appendV1`, `finishV1` and `reconstructV1` (no GL calls in reconstructi
 `storage/DocumentDatabase.java` under the Java package is the worker-confined SQLite
 adapter. Host core oracle: `diagnostics/run_m03.sh`; matched reconstruction pixels:
 `diagnostics/run_m02.sh pixels`. Android storage fixtures are under `app/src/androidTest/`.
+
+`tablet/{session.hpp,store_jni.cpp}` and `storage/{EditorStore,StorePort}.java` implement the staged switch and bounded worker/codec port. `document/{eraser,working_set}.hpp` implement swept ink coverage and aggregate admission. See the [v1 contract](M03_CONTRACT.md), [isolated tablet procedure](M03_TABLET.md), `diagnostics/run_m03_latency.sh` and `diagnostics/compare_m03.sh`. Only `src/m03Verify` has the test-process recovery service.

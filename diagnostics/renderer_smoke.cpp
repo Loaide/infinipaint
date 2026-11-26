@@ -148,6 +148,7 @@ int main(int argc,char** argv){
         using clock=std::chrono::steady_clock;
         bool queue=std::string_view(argv[1])=="bench-queue";
         if(queue) {
+            engine::tablet::setPhysicalSlice(288u<<20);
             auto d=std::make_unique<engine::document::Document>(engine::document::Uuid{3});
             check(d->grant(1,65536) && engine::tablet::stage(std::move(d),96u<<20),"bench document");
             engine::tablet::activate(0,0,1);engine::tablet::discard();
