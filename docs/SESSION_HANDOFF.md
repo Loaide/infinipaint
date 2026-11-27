@@ -2,6 +2,10 @@
 
 `feature/m04-scalable-renderer`, inspected `2af1a8fc4a5df3e777027d4a6c946f00515a159e`. Owner selected native Vulkan with compact instancing for the reference tablet. Preserve GLES2/v1 and ADR-013. See [selection and fidelity requirement](../reports/M04_BACKEND_GATE.md). Next: isolated publication and editing, not another diagnostic campaign. No device authorization.
 
+## M04.3 incremental publication checkpoint (functionally verified)
+
+See [M04.3 incremental report](../reports/M04_3_INCREMENTAL.md). Camera mailbox and ordered ink lane are in the production GLES2 application; frame planning still uses the existing shared lock. Host tests, Android build and 10/10 tablet functional checks passed. See report for active timing and remaining limitations. No production Vulkan migration.
+
 ## Previous selection request (historical)
 
 `feature/m04-scalable-renderer`, inspected `f25961daf457aafae5d0732b58dbe751878e8fe3`. Owner-reported benchmark source `8f9b53044d240f413f10f69a61aafe35fa02c350`, local APK/archive hashes verified; exact installed-image/source linkage not independently proven. Preserve benchmark checkpoint, host timeout (`ab0541a`) and captures. [Gate decision request and targeted validation](../reports/M04_BACKEND_GATE.md); [compact evidence](../reports/M04_BACKEND_EVIDENCE_COMPACT.md). M03 tested application unchanged. Next: owner disposition of native Vulkan + compact instances and outstanding capacity/lifecycle/thermal/peak checks. Do not repeat the campaign, start migration or enter M04.3. ADR-006 remains provisional; ADR-013 unchanged.

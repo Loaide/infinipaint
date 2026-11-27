@@ -24,7 +24,7 @@ public final class EditorStore {
     private final long resident;
     // Main thread
     private Listener listener;
-    private boolean busy;
+    private boolean busy, opening;
     private String message="Opening catalog";
     private double x,y,zoom=1;
     private long sequence;
@@ -65,7 +65,10 @@ public final class EditorStore {
         else if(active!=null) l.restore(x,y,zoom);
     }
     public void detach(Listener l) {if(listener==l) listener=null;}
+    public void redrawCurrent() {if(listener!=null) listener.redraw();}
     public boolean acceptsInput() {return !busy && active!=null;}
+    /** Keep navigation on the active document during edits, not during a switch. */
+    public boolean acceptsNavigation() {return !opening && active!=null;}
     public String status() {
         long visible=NativeBridge.revision(),stored=durable;
         String label=message.equals("Saved") && visible!=stored?"Saving":message;
@@ -82,7 +85,7 @@ public final class EditorStore {
     }
     public void open(boolean create,boolean next) {
         if(busy) return;
-        busy=true;
+        busy=true;opening=true;
         NativeBridge.suspend(true);
         flushView();
         show("Opening");
@@ -106,12 +109,12 @@ public final class EditorStore {
                 }
                 main.post(()->{
                     active=target; x=view.x;y=view.y;zoom=view.zoom;sequence=view.seq;viewDurable=view.seq;
-                    barrierDoc=null;busy=false;
+                    barrierDoc=null;busy=false;opening=false;
                     if(listener!=null) listener.restore(x,y,zoom);
                     NativeBridge.suspend(false);show("Saved");
                 });
             } catch(RuntimeException e) {
-                main.post(()->{busy=false;NativeBridge.suspend(false);show("Open failed: "+e.getMessage());});
+                main.post(()->{busy=false;opening=false;NativeBridge.suspend(false);show("Open failed: "+e.getMessage());});
             }
         });
     }
@@ -221,7 +224,7 @@ public final class EditorStore {
         }
     }
     public void camera(double px,double py,double z) {
-        if(active==null || busy || (x==px && y==py && zoom==z)) return;
+        if(!acceptsNavigation() || (x==px && y==py && zoom==z)) return;
         x=px;y=py;zoom=z;
         if(!navDirty) {navDirty=true;main.postDelayed(viewTask,750);}
     }

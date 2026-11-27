@@ -55,7 +55,7 @@ with tempfile.TemporaryDirectory() as directory:
     # Insert only into a disposable copy. Fail if a source anchor moved.
     src = (cpp / "native_bridge.cpp").read_text(encoding="utf-8")
     hooks = [
-        ("framePanX = cameraPanX;", "probeLatch(cameraPanX,visibleRevision.load());"),
+        ("packet.head=sceneHead;", "probeLatch(packet.view.x,packet.revision);"),
         ("// No input mutex is held during OpenGL calls.", "probeUnlocked();"),
         ("const double renderCpuMs =", "probeWork(frameDrawCalls,frameUploadBytes);"),
     ]

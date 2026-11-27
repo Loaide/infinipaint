@@ -22,9 +22,9 @@ public final class InputAuditRecorder {
         dir = base != null ? base : new File(context.getFilesDir(), "diagnostics");
         if (!dir.exists() && !dir.mkdirs()) Log.e("IP_INPUT_AUDIT", "Cannot create " + dir);
     }
-    public void record(int id, int tool, long sampleNs, long callbackNs, double x, double y,
+    public synchronized void record(int id, int tool, long sampleNs, long callbackNs, double x, double y,
                        float pressure, float tx, float ty, boolean historicalSample, String outcome) {
-        // Called on UI thread. No disk I/O, no per-sample logging.
+        // Ink owner records the native outcome. Export can also be requested by UI.
         if (rows.size() >= MAX_ROWS) { overflow++; return; }
         // String.format uses a heavyweight formatter on the touch callback.
         // A small builder avoids formatter allocation per hardware sample.
@@ -51,7 +51,7 @@ public final class InputAuditRecorder {
         else if ("OUT_OF_ORDER".equals(outcome)) outOfOrder++;
         else rejected++;
     }
-    public void export() {
+    public synchronized void export() {
         if (rows.isEmpty()) return;
         final ArrayList<String> batch = new ArrayList<>(rows);
         rows.clear();

@@ -12,6 +12,7 @@ public final class NativeBridge {
 
  public static native void setSmoothingPreset(int preset);
  public static native boolean begin(int id,int toolType);
+ static native boolean beginCaptured(int id,int toolType,double x,double y,double zoom,int preset);
  public static native boolean sample(int id,double x,double y,double seconds,float pressure,float tiltX,float tiltY);
  public static native boolean end(int id);
  public static native void cancel(int id);

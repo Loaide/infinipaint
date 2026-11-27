@@ -27,6 +27,15 @@ public final class MainActivity extends Activity implements EditorStore.Listener
     private EditorStore documents;
     private boolean eraseMode,erasing,prefixOnly;
     private static int retryEndId=-1; // process-session pending commit survives Activity recreation
+    // Main-thread gate spans Activity recreation and the terminal acknowledgement.
+    // Native admission/sealing run on the ink owner, not in a MotionEvent callback.
+    private static final InkLane inkLane = new InkLane(256);
+    static { new Thread(inkLane::run,"IP-ink").start(); }
+    private static MainActivity inkOwner;
+    private Runnable afterInk;
+    // Ink-thread only, reset by the ordered DOWN task.
+    private boolean began, sampleFailed;
+    private boolean destroyed;
     private final double[] erasePath=new double[8192];
     private int eraseCount;
     @Override public void changed() {updateStatus();}
@@ -101,6 +110,7 @@ public final class MainActivity extends Activity implements EditorStore.Listener
             super.dump(prefix, fd, out, args);
             return;
         }
+        out.println(prefix+"ink_lane [queued,highWater,rejected] "+java.util.Arrays.toString(inkLane.counters()));
         FrameTelemetry.Snapshot s = frames.snapshot(mark);
         out.printf(Locale.US, "%sIP_FRAMES camera=%d stylus=%d other=%d callbacks=%d withoutPending=%d%n",
                 prefix, s.camera, s.stylus, s.other, s.callbacks, s.withoutPending);
@@ -179,6 +189,7 @@ public final class MainActivity extends Activity implements EditorStore.Listener
         int tool = e.getToolType(index);
 
         if (!isStylus(tool)) return;
+        if(inkOwner!=null) {notice("Previous stroke is still finishing. Please retry.");return;}
         if(retryEndId>=0) {recoverPrefix();return;}
         prefixOnly=false;
         erasing=eraseMode || tool==MotionEvent.TOOL_TYPE_ERASER;
@@ -189,7 +200,13 @@ public final class MainActivity extends Activity implements EditorStore.Listener
         Log.i(TAG, "Stylus DOWN, tool=" + tool
                 + ", id=" + id);
 
-        if (NativeBridge.begin(id, tool)) {
+        final double px=camera.panX(), py=camera.panY(), zoom=camera.zoom();
+        final int preset=smoothingPreset;
+        if (inkLane.offer(()->{
+            sampleFailed=false;
+            began=NativeBridge.beginCaptured(id,tool,px,py,zoom,preset);
+        },false)) {
+            inkOwner=this;
             previousAuditTimestamp = Long.MIN_VALUE;
             stylusId = id;
 
@@ -267,16 +284,18 @@ public final class MainActivity extends Activity implements EditorStore.Listener
             erasePath[eraseCount++]=camera.panX()+x/camera.zoom();
             erasePath[eraseCount++]=camera.panY()+y/camera.zoom();return;
         }
-        // Record every raw Android sample before the native processing path.
+        // Capture raw values on UI; record the processing outcome on the ink lane.
         final long sampleNs = timestampNs;
         final long callbackNs = SystemClock.uptimeMillis() * 1_000_000L;
+        final int id=stylusId, tool=e.getToolType(index);
         final String outcome;
         if (sampleNs < previousAuditTimestamp) outcome = "OUT_OF_ORDER";
         else if (sampleNs == previousAuditTimestamp) outcome = "DUPLICATE_TIMESTAMP";
         else outcome = "PENDING";
         previousAuditTimestamp = sampleNs;
-        boolean accepted = NativeBridge.sample(
-                stylusId,
+        boolean queued = inkLane.offer(()->{
+            boolean accepted = began && !sampleFailed && NativeBridge.sample(
+                id,
                 x,
                 y,
                 seconds,
@@ -285,13 +304,17 @@ public final class MainActivity extends Activity implements EditorStore.Listener
                 tiltY
         );
 
-        if (inputAudit != null) inputAudit.record(stylusId, e.getToolType(index), sampleNs,
+            if (!accepted) sampleFailed=true;
+            inputAudit.record(id, tool, sampleNs,
                 callbackNs, x, y, pressure, tiltX, tiltY, history >= 0,
                 accepted ? ("DUPLICATE_TIMESTAMP".equals(outcome) ? "ACCEPTED_SAME_TIMESTAMP" : "PENDING".equals(outcome) ? "ACCEPTED" : outcome) : "NATIVE_REJECTED");
-        if (!accepted) {
-            Log.e(TAG, "NativeBridge.sample rejected input");
+            // GLSurfaceView coalesces pending requests. Even a historical accepted
+            // prefix must become visible if its later samples cannot be admitted.
+            if (accepted) requestCanvasRender(FrameTelemetry.Reason.STYLUS);
+        },false);
+        if (!queued) {
             prefixOnly=true;
-            notice("Sample rejected. Lift to commit the accepted prefix, or cancel.");
+            notice("Input queue full. Lift to review the accepted prefix, or cancel.");
         }
     }
 
@@ -311,8 +334,6 @@ public final class MainActivity extends Activity implements EditorStore.Listener
         }
 
         sendStylusSample(e, index, -1);
-        // One render request per MotionEvent, not per historical sample.
-        requestCanvasRender(FrameTelemetry.Reason.STYLUS);
     }
 
     private void finishStylus(MotionEvent e, int index) {
@@ -321,7 +342,9 @@ public final class MainActivity extends Activity implements EditorStore.Listener
 
         int id = stylusId;
 
-        // Include the final tip position.
+        // UP can carry coalesced historical samples too. Preserve their order.
+        for(int h=0;h<e.getHistorySize() && stylusId>=0;h++) sendStylusSample(e,index,h);
+        if(stylusId<0) return;
         sendStylusSample(e, index, -1);
 
         if (stylusId != id) return;
@@ -331,10 +354,7 @@ public final class MainActivity extends Activity implements EditorStore.Listener
         if(erasing) {
             erasing=false;
             documents.command(4,java.util.Arrays.copyOf(erasePath,eraseCount),6/camera.zoom());
-        } else if (!NativeBridge.end(id)) {
-            Log.e(TAG, "NativeBridge.end failed");
-            retryEndId=id;recoverPrefix();
-        } else documents.save();
+        } else finishInk(id,false);
 
         Log.i(TAG, "Stylus UP");
 
@@ -347,31 +367,90 @@ public final class MainActivity extends Activity implements EditorStore.Listener
         if (stylusId >= 0) {
             int id = stylusId;
             stylusId = -1;
-            if(!erasing) NativeBridge.cancel(id);
+            if(!erasing) finishInk(id,true);
             erasing=false;
             requestCanvasRender(FrameTelemetry.Reason.STYLUS);
         }
         updateStatus();
     }
+    private void finishInk(int id,boolean cancel) {
+        final boolean full=prefixOnly;
+        if (!inkLane.offer(()->{
+            boolean pending=false;
+            if (began) {
+                if (cancel) NativeBridge.cancel(id);
+                else pending=full || sampleFailed || !NativeBridge.end(id);
+            }
+            final boolean retained=pending, started=began;
+            runOnUiThread(()->{
+                inkOwner=null;
+                if(retained) retryEndId=id;
+                else if(started && !cancel) documents.save();
+                documents.redrawCurrent();
+                if(!running) inputAudit.export();
+                if(destroyed) inputAudit.close();
+                if(running && !started && !cancel) notice("Stroke not started: document or save queue busy.");
+                if(running && retained) recoverPrefix();
+                Runnable continuation=afterInk;
+                afterInk=null;
+                if(running && !retained && continuation!=null) continuation.run();
+            });
+        },true)) throw new IllegalStateException("Reserved terminal slot unavailable");
+    }
+    // Serialize document commands behind any accepted UP/CANCEL, including
+    // the asynchronous save signal. Never wait on the UI thread.
+    private void afterStroke(Runnable action) {
+        cancelStylus(); resetFingers();
+        if(inkOwner==null) action.run();
+        else if(inkOwner==this && afterInk==null) afterInk=action;
+        else notice("Stroke operation pending. Please retry.");
+    }
+    private boolean prefixDialog;
     private void recoverPrefix() {
-        new AlertDialog.Builder(this).setTitle("Stroke not committed").setMessage(
+        if(retryEndId<0 || inkOwner!=null || prefixDialog || destroyed || !running) return;
+        prefixDialog=true;
+        final int id=retryEndId;
+        AlertDialog dialog=new AlertDialog.Builder(this).setTitle("Stroke not committed").setMessage(
                 "The accepted prefix is still on the canvas. Retry after saving, or explicitly discard it.")
-                .setPositiveButton("Retry",(d,w)->{
-                    if(NativeBridge.end(retryEndId)) {retryEndId=-1; documents.save();}
-                    else notice("Still pending. Tap with the pen to retry.");
-                    changed();redraw();
-                }).setNegativeButton("Discard prefix",(d,w)->{NativeBridge.cancel(retryEndId);retryEndId=-1;changed();redraw();}).show();
+                .setPositiveButton("Retry",(d,w)->resolvePrefix(id,false))
+                .setNegativeButton("Discard prefix",(d,w)->resolvePrefix(id,true)).create();
+        dialog.setOnDismissListener(d->prefixDialog=false);
+        dialog.show();
+    }
+    private void resolvePrefix(int id,boolean discard) {
+        if(id!=retryEndId || inkOwner!=null || !documents.acceptsInput()) return;
+        if(!inkLane.offer(()->{
+            boolean done;
+            if(discard) {NativeBridge.cancel(id);done=true;}
+            else done=NativeBridge.end(id);
+            final boolean resolved=done;
+            runOnUiThread(()->{
+                inkOwner=null;
+                if(resolved) {
+                    retryEndId=-1;
+                    if(!discard) documents.save();
+                } else if(running) notice("Still pending. Tap with the pen to retry.");
+                documents.redrawCurrent();
+                if(running) changed();
+                if(destroyed) inputAudit.close();
+                Runnable continuation=afterInk;
+                afterInk=null;
+                if(running && resolved && continuation!=null) continuation.run();
+            });
+        },true)) {notice("Ink lane busy. Please retry.");return;}
+        inkOwner=this;
     }
     private void editMenu() {
         if(retryEndId>=0) {recoverPrefix();return;}
         cancelStylus(); resetFingers();
         String[] options={"Undo","Redo",eraseMode?"Use pen":"Whole-stroke eraser","Save / retry","New document","Open next document"};
-        new AlertDialog.Builder(this).setTitle("Document").setItems(options,(d,i)->{
+        new AlertDialog.Builder(this).setTitle("Document").setItems(options,(d,i)->afterStroke(()->{
+            if(retryEndId>=0) {recoverPrefix();return;}
             if(i<2) documents.command(i+1,null,0);
             if(i==2) {eraseMode=!eraseMode;notice(eraseMode?"Whole-stroke eraser":"Pen");}
             if(i==3) documents.flush();
             if(i>=4) documents.open(i==4,i==5);
-        }).show();
+        })).show();
     }
 
     // --------------------------------------------
@@ -417,7 +496,6 @@ public final class MainActivity extends Activity implements EditorStore.Listener
     // --------------------------------------------
 
     private boolean handleTouch(MotionEvent e) {
-        if(documents==null || !documents.acceptsInput()) return true;
         int action = e.getActionMasked();
         int index = e.getActionIndex();
 
@@ -425,6 +503,10 @@ public final class MainActivity extends Activity implements EditorStore.Listener
             cancelStylus();
             resetFingers();
             return true;
+        }
+
+        if(documents==null || !documents.acceptsNavigation()) {
+            cancelStylus(); resetFingers(); return true;
         }
 
         if (action == MotionEvent.ACTION_DOWN
@@ -437,7 +519,8 @@ public final class MainActivity extends Activity implements EditorStore.Listener
                             + " pointer=" + e.getPointerId(index));
 
             if (isStylus(tool)) {
-                startStylus(e, index);
+                if(documents.acceptsInput()) startStylus(e, index);
+                else notice("Document edit in progress. Retry the stroke when ready.");
             } else if (isFinger(tool)) {
                 startFinger(e, index);
             }
@@ -677,17 +760,15 @@ public final class MainActivity extends Activity implements EditorStore.Listener
             android.widget.Toast.makeText(this, "Raw samples exported; see IP_INPUT_AUDIT in Logcat", android.widget.Toast.LENGTH_LONG).show();
             return true;
         });
-        clearButton.setOnClickListener(v -> {
-            cancelStylus();
-            resetFingers();
+        clearButton.setOnClickListener(v -> afterStroke(()->{
             if(retryEndId>=0) {recoverPrefix();return;}
             documents.command(3,null,0);
             requestCanvasRender(FrameTelemetry.Reason.OTHER);
-        });
+        }));
 
         toolbar.addView(clearButton);
         Button edit=new Button(this);edit.setText("Document");
-        edit.setOnClickListener(v->editMenu());toolbar.addView(edit);
+        edit.setOnClickListener(v->afterStroke(this::editMenu));toolbar.addView(edit);
 
         // Put the toolbar in normal layout space.
         // This prevents it from covering the drawing surface
@@ -757,7 +838,8 @@ public final class MainActivity extends Activity implements EditorStore.Listener
     protected void onDestroy() {
         documents.detach(this);
         // Finish any pending diagnostic write; don't retain a worker per rotation.
-        inputAudit.close();
+        destroyed=true;
+        if(inkOwner!=this) inputAudit.close();
         super.onDestroy();
     }
 }

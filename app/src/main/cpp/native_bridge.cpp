@@ -25,6 +25,7 @@
 #include "document/eraser.hpp"
 #include "document/working_set.hpp"
 #include "tablet/session.hpp"
+#include "tablet/view_intent.hpp"
 #include <cstring>
 #include "stroke/spline.hpp"
 
@@ -107,6 +108,7 @@ namespace {
     struct CompletedGeometry : GeometryCharge {std::array<Mesh,3> derived;};
 
     struct Trace {
+        tablet::ViewIntent captureView;
         uint64_t gpuId = 0;
         input::InputProcessor input;
         stroke::IncrementalSplineBuilder spline;
@@ -197,7 +199,7 @@ namespace {
     struct Published {
         Key next=0;
         document::Revision geometry=0;
-        std::shared_ptr<FinishedTrace> shape;
+        std::shared_ptr<const FinishedTrace> shape;
         size_t bytes=0;
         std::array<float,4> rgba{};
     };
@@ -209,6 +211,7 @@ namespace {
     }
     using Scene=std::map<Key,Published,std::less<Key>,SceneAllocator<std::pair<const Key,Published>>>;
     Scene finished, pendingScene;
+    document::Revision sceneRevision=0; // belongs to the published head + patch, not the save worker
     size_t sceneBytes=0,sceneLimit=SIZE_MAX,canonicalLimit=SIZE_MAX;
     constexpr size_t publicationLimit=65536;
     Key sceneHead=0;
@@ -251,9 +254,7 @@ namespace {
 // Camera coordinates are in world-space pixels.
 // Screen position = (world position - camera pan) * zoom.
 
-    double cameraPanX = 0.0;
-    double cameraPanY = 0.0;
-    double cameraZoom = 1.0;
+    tablet::ViewMailbox desiredView;
 
     constexpr double MAX_ZOOM = 16.0;
 
@@ -889,7 +890,7 @@ struct SceneSink final : document::Observer {
                 if(s!=document::Status::Ok) return s;
             }
             finished.swap(retired);pendingScene.swap(unused);
-            ++finishedEpoch;sceneHead=0;sceneBytes=0;
+            ++finishedEpoch;sceneHead=0;sceneBytes=0;sceneRevision=doc.revision()+1;
             return document::Status::Ok;
         }
         if(appended && touched.size()==1 && appendNodes.count(touched.front().id) &&
@@ -907,7 +908,7 @@ struct SceneSink final : document::Observer {
                 pendingScene.erase(prev);
             }
             finished.merge(appendNodes);pendingScene.merge(appendPatch);
-            sceneHead=doc.first();sceneBytes+=appendedBytes;
+            sceneHead=doc.first();sceneBytes+=appendedBytes;sceneRevision=doc.revision()+1;
             return document::Status::Ok;
         }
         size_t projected=sceneBytes;
@@ -928,8 +929,9 @@ struct SceneSink final : document::Observer {
                 dst.geometry=doc.revision()+1;
                 if(appended) {dst.shape=appended;dst.bytes=appendedBytes;}
                 else {
-                    dst.shape=std::make_shared<FinishedTrace>();
-                    if(!reconstructV1(r->value.ink,*dst.shape,r->value.dx,r->value.dy,sceneLimit-projected,canonicalLimit)) {valid=false;return;}
+                    auto shape=std::make_shared<FinishedTrace>();
+                    if(!reconstructV1(r->value.ink,*shape,r->value.dx,r->value.dy,sceneLimit-projected,canonicalLimit)) {valid=false;return;}
+                    dst.shape=std::move(shape);
                     dst.bytes=meshBytes(*dst.shape);
                 }
                 if(dst.bytes>sceneLimit-projected) {valid=false;return;}
@@ -959,6 +961,7 @@ struct SceneSink final : document::Observer {
         pendingScene.merge(notifications);
         sceneHead=doc.first();
         sceneBytes=projected;
+        sceneRevision=doc.revision()+1;
         return document::Status::Ok;
     }
 };
@@ -995,16 +998,7 @@ Java_com_infinipaint_demo_NativeBridge_setCamera(
         return;
     }
 
-    std::lock_guard<std::mutex> guard(stateMutex);
-
-    cameraPanX = panX;
-    cameraPanY = panY;
-
-    cameraZoom = std::clamp(
-            (double)zoom,
-            MIN_ZOOM,
-            MAX_ZOOM
-    );
+    desiredView.publish(panX,panY,std::clamp((double)zoom,MIN_ZOOM,MAX_ZOOM));
 }
 
 JNIEXPORT void JNICALL
@@ -1016,20 +1010,14 @@ Java_com_infinipaint_demo_NativeBridge_setSmoothingPreset(JNIEnv*, jclass, jint 
 // Begin stroke
 // --------------------------------------------------
 
-JNIEXPORT jboolean JNICALL
-Java_com_infinipaint_demo_NativeBridge_begin(
-        JNIEnv*,
-        jclass,
-        jint id,
-        jint tool
-) {
+static jboolean beginCaptured(jint id,jint tool,tablet::ViewIntent view,int preset) {
 
     std::lock_guard<std::mutex> guard(stateMutex);
 
     // Cutoffs in world units. Three intentionally distinct presets; stronger
     // smoothing has more geometric phase lag, while raw tip preview stays live.
     input::OneEuroParams params;
-    switch (smoothingPreset.load(std::memory_order_relaxed)) {
+    switch (preset) {
         case 0: params.min_cutoff = 8.0; params.beta = 0.025; params.dcutoff = 1.5; break;
         case 2: params.min_cutoff = 1.6; params.beta = 0.002; params.dcutoff = 1.0; break;
         default: params.min_cutoff = 3.5; params.beta = 0.009; params.dcutoff = 1.0; break;
@@ -1049,7 +1037,8 @@ Java_com_infinipaint_demo_NativeBridge_begin(
                            model->canonicalBytes()+1024>canonicalLimit || sceneLimit-sceneBytes<54*sizeof(Vertex) ||
                            !admits(54*sizeof(Vertex),1)))) return JNI_FALSE;
         auto trace=std::make_unique<Trace>(std::move(inputProcessor.value()),std::move(fitter.value()));
-        trace->strokeRadiusWorld = (float)(1.9 / cameraZoom);
+        trace->captureView = view;
+        trace->strokeRadiusWorld = (float)(1.9 / trace->captureView.zoom);
         trace->meshAllowance=sceneLimit-sceneBytes;
         trace->scratchAllowance=canonicalLimit;
         trace->brush.filter=params;
@@ -1069,6 +1058,18 @@ Java_com_infinipaint_demo_NativeBridge_begin(
 // --------------------------------------------------
 // Receive input sample
 // --------------------------------------------------
+
+JNIEXPORT jboolean JNICALL Java_com_infinipaint_demo_NativeBridge_begin(
+        JNIEnv*,jclass,jint id,jint tool) {
+    return beginCaptured(id,tool,desiredView.latch(),smoothingPreset.load(std::memory_order_relaxed));
+}
+
+JNIEXPORT jboolean JNICALL Java_com_infinipaint_demo_NativeBridge_beginCaptured(
+        JNIEnv*,jclass,jint id,jint tool,jdouble x,jdouble y,jdouble zoom,jint preset) {
+    if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(zoom) || zoom<=0)
+        return JNI_FALSE;
+    return beginCaptured(id,tool,{x,y,std::clamp((double)zoom,MIN_ZOOM,MAX_ZOOM)},preset);
+}
 
 static bool appendV1(Trace&,const input::RawInputPoint&,double,int64_t,bool);
 
@@ -1113,10 +1114,10 @@ Java_com_infinipaint_demo_NativeBridge_sample(
            !saves.growStroke(bytes)) return JNI_FALSE;
     }
     double worldX =
-            cameraPanX + x / cameraZoom;
+            trace.captureView.x + x / trace.captureView.zoom;
 
     double worldY =
-            cameraPanY + y / cameraZoom;
+            trace.captureView.y + y / trace.captureView.zoom;
 
     if (
             !std::isfinite(worldX) ||
@@ -1140,7 +1141,7 @@ Java_com_infinipaint_demo_NativeBridge_sample(
             tx,
             ty
     };
-    if (!appendV1(trace,point,cameraZoom,waitNs,true)) return JNI_FALSE;
+    if (!appendV1(trace,point,trace.captureView.zoom,waitNs,true)) return JNI_FALSE;
     const int64_t nowNs = profileNs();
     newestEventNs.store(static_cast<int64_t>(time*1000000000.0),std::memory_order_relaxed);
     latestSampleEndNs.store(nowNs,std::memory_order_relaxed);
@@ -1469,7 +1470,7 @@ bool ipTestCodecReplay() {
             return a->size()==b->size() && (a->empty() || !std::memcmp(a->data(),b->data(),a->size()*sizeof(Vertex)));
         };
         if(!equal(old.raw,replay.raw)||!equal(old.clean,replay.clean)||!equal(old.spline,replay.spline)) return false;
-        old=std::move(replay);
+        pub.shape=std::make_shared<const FinishedTrace>(std::move(replay));
     }
     pendingScene=finished;
     ++finishedEpoch;
@@ -1524,6 +1525,7 @@ Java_com_infinipaint_demo_NativeBridge_resizeViewport(
 
     width = std::max(1, (int)w);
     height = std::max(1, (int)h);
+    desiredView.viewport(width,height);
 
     glViewport(0, 0, width, height);
 }
@@ -1718,33 +1720,28 @@ Java_com_infinipaint_demo_NativeBridge_render(
         ++validSampleFrames;
     }
 
-    Scene newCompleted;
     FrameGrowth growth;
-    Key frameHead=0;
-    uint64_t frameEpoch = 0;
-    std::vector<std::pair<uint64_t, ViewTrace>> active;
-
-    // Snapshot camera state for this frame.
-
-    double framePanX = 0.0;
-    double framePanY = 0.0;
-    double frameZoom = 1.0;
-
-    {
+    struct FramePublication {
+        Scene patches;
+        std::vector<std::pair<uint64_t, ViewTrace>> active;
+        tablet::ViewIntent view;
+        Key head;
+        uint64_t epoch;
+        document::Revision revision;
+    };
+    const auto frame = [&] {
+        FramePublication packet;
         const int64_t snapshotStartNs = profileNs();
         std::lock_guard<std::mutex> guard(stateMutex);
-
-        framePanX = cameraPanX;
-        framePanY = cameraPanY;
-        frameZoom = cameraZoom;
-
-        frameEpoch = finishedEpoch;
+        packet.view = desiredView.latch();
+        packet.epoch = finishedEpoch;
+        packet.revision = sceneRevision;
         // Epoch mismatch means clear; GL thread will retire old cache below.
         if(program && buffer) {
-            newCompleted.swap(pendingScene);
+            packet.patches.swap(pendingScene);
         }
-        frameHead=sceneHead;
-
+        packet.head=sceneHead;
+        auto& active=packet.active;
         active.reserve(live.size());
 
         for (auto& pair : live) {
@@ -1794,9 +1791,15 @@ Java_com_infinipaint_demo_NativeBridge_render(
         }
         auditSnapshotNs.fetch_add(profileNs() - snapshotStartNs, std::memory_order_relaxed);
         auditSnapshotFrames.fetch_add(1, std::memory_order_relaxed);
-    }
+        return packet;
+    }();
 
     // No input mutex is held during OpenGL calls.
+    const auto& newCompleted=frame.patches;
+    const auto& active=frame.active;
+    const auto frameHead=frame.head;
+    const auto frameEpoch=frame.epoch;
+    const double framePanX=frame.view.x, framePanY=frame.view.y, frameZoom=frame.view.zoom;
 
     glClearColor(
             0.025f,
@@ -2038,8 +2041,9 @@ void activate(double x,double y,double zoom) noexcept {
         retired.swap(pendingScene);
         pendingScene.swap(stagedPublication);
         sceneHead=model->first();
+        sceneRevision=model->revision();
         sceneBytes=stagedBytes;sceneLimit=stagedLimit;canonicalLimit=stagedCanonicalLimit;
-        cameraPanX=x;cameraPanY=y;cameraZoom=zoom;
+        desiredView.publish(x,y,zoom);
         ++finishedEpoch; persistent=true;
         model->observe(&sceneSink);
         visibleRevision.store(model->revision());
