@@ -139,7 +139,7 @@ extern "C" JNIEXPORT jboolean JNICALL Java_com_infinipaint_diag_matched_Bench_st
         ++seq;auto& row=rows.at(seq);int prev=visible;
         if(live && seq>warm && seq<=warm+measured)++visible;
         Frame f{seq,visible,prev,visible-prev,work=="pan"?float(seq%16)*.25f:0.f,
-                bool(timer==1 && seq<=warm+measured && seq%8==0),parity};
+                bool(timer==1 && seq<=warm+measured && seq%8==0),parity,life};
         std::vector<uint8_t> pixels;auto cpu=detailEnabled()?ns(CLOCK_THREAD_CPUTIME_ID):0;
         row.tick=tick;row.begin=nowNs();
         if(detailEnabled()){char label[48];snprintf(label,sizeof(label),"IP_MATCH frame %d",seq);ATrace_beginSection(label);}

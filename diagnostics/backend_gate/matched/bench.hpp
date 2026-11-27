@@ -14,7 +14,7 @@ struct Stroke {int first,count;float color[4];int x,y,w,h;}; // conservative sci
 struct Scene {std::vector<Instance> items;std::vector<Vertex> expanded;std::vector<Stroke> strokes;};
 // initial is prefix loaded at init, suffix starts at [first,first+added).
 // draw only min(stroke.count, visible-stroke.first) positive chords.
-struct Frame {int seq,visible,first,added;float pan;bool timer,readback;};
+struct Frame {int seq,visible,first,added;float pan;bool timer,readback;bool lifecycle=false;};
 struct Metrics {int draws=0;uint64_t bytes=0;int64_t syncNs=0,submitNs=0,presentCallNs=0;};
 // Backends report delayed results via callbacks keyed by originating seq; <=1 per seq.
 void gpuResult(int seq,uint64_t ns);

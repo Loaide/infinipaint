@@ -56,3 +56,5 @@ Zero transports; the one-online-device guard stopped the procedure before any sh
 ## Targeted lifecycle correction
 
 Capacity and sustained VKI pacing passed on the tested workloads. No absolute capacity breakpoint established. Lifecycle rejected a nonidentity surface transform. Retain supported identity preTransform and permit compositor rotation, preserving extent validation. Add lifecycle-only execution; retain previous performance evidence. Allow idle refresh variation without relaxing pacing gates. Lifecycle recovery remains unverified.
+
+Lifecycle diagnostic: accept and log VK_SUBOPTIMAL_KHR only for lifecycle frames with unchanged surface dimensions. Performance benchmarks retain strict result handling. Production orientation-aware swapchain recreation remains required. Lifecycle acceptance remains pending.

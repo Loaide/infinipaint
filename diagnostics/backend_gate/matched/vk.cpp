@@ -814,8 +814,18 @@ Metrics Vulkan::frame(const Frame& f, std::vector<uint8_t>* pixels) {
     uint32_t index = 0;
     auto t = nowNs();
     wait(s);
-    check(vkAcquireNextImageKHR(device, swapchain, kWaitNs, s.acquire, VK_NULL_HANDLE, &index),
-          "vk acquire (surface may have changed)");
+    auto checkWSI = [&](VkResult result, const char* operation) {
+        if (result == VK_SUBOPTIMAL_KHR && f.lifecycle &&
+            ANativeWindow_getWidth(window) == int32_t(extent.width) &&
+            ANativeWindow_getHeight(window) == int32_t(extent.height)) {
+            BLOG("vk lifecycle SUBOPTIMAL seq=%d operation=%s extent=%ux%u",
+                 f.seq, operation, extent.width, extent.height);
+            return;
+        }
+        check(result, operation);
+    };
+    checkWSI(vkAcquireNextImageKHR(device, swapchain, kWaitNs, s.acquire, VK_NULL_HANDLE, &index),
+             "vk acquire (surface may have changed)");
     m.syncNs = nowNs() - t;
     harvest(i);
     pastPresents();
@@ -856,7 +866,7 @@ Metrics Vulkan::frame(const Frame& f, std::vector<uint8_t>* pixels) {
     t = nowNs();
     const auto status = vkQueuePresentKHR(queue, &present);
     m.presentCallNs = nowNs() - t;
-    check(status, "vk present (surface may have changed)");
+    checkWSI(status, "vk present (surface may have changed)");
     if (f.readback) {
         wait(s);
         mappedSync(readback, false);
