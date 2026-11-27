@@ -1,5 +1,14 @@
 # Backend selection gate — capability probe ready, device evidence pending
 
+**Authorized inventory attempt — blocked at identity preflight.** On `feature/m04-scalable-renderer` at `677fa6c9d3c186bada279e1dddb85b659749bac2`, inspected this gate, handoff, state and decision register. The local APK SHA-256 matched the authorized artifact below. Raw `adb devices -l` stdout (header followed by an empty line):
+
+```text
+List of devices attached
+
+```
+
+Zero transports; the one-online-device guard stopped the procedure before any shell command, install, launch or uninstall. There is no on-device capability log to archive. Current identity, GLES actual contexts/extensions/precision, ANGLE selection, Vulkan features/limits, memory, compute, sync and GPU profiling remain **unverified, not unsupported**. Historical preflight is not a substitute. Resume only after the owner connects the authorized SM-X626B: recheck one online transport, model/fingerprint, artifact hash and probe package absence before installation. The inventory authorization does not cover the benchmark.
+
 **No production API recommendation yet.** M04.2 is owner-accepted as feasibility only. Packed pages lead, not integrated: 4→19 median pages for the same sparse output, 723 µs warm sparse order, 6.262 s validated scan at 100k, builders proportional to all spans, 96.5% dots and 65,536 samples/record admission. [Measurements and limits](M04_2_DATA_ACCESS.md). No new AA or storage work at this gate.
 
 `feature/m04-scalable-renderer`; inspected `5ee7fca9c942c8fc71a2e4175bebcb5f44070656`, probe build sources `204997e0423082f6e85ca183b4b03121161ba6c9`. Inspected decision register, M04 proposal, previous handoff/results, `docs/M01_FRAME_CAPTURE.md`, `app/build.gradle`, `reports/M03_ACCEPTANCE.md` and `captures/m03-device-preflight.txt` (hash matches inventory). Prior physical evidence: SM-X626B, Android 16 build X626BXXS7BZB7_OJM7BZB7, 1800×2880, 90 Hz, alpha8/MAX path observed. It does **not** identify today's driver, highest reliable GLES context, ANGLE status, Vulkan queues/features, usable GPU clocks, or a backend winner.

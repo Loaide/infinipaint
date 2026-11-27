@@ -1,6 +1,6 @@
-# M04 backend selection open — waiting for separate device authorization
+# M04 backend selection open — authorized inventory blocked: no tablet transport
 
-On `feature/m04-scalable-renderer`, inspected `5ee7fca9c942c8fc71a2e4175bebcb5f44070656`; host-built probe sources `204997e0423082f6e85ca183b4b03121161ba6c9`. [Evidence, exact APK hash, scope and matched protocol](../reports/M04_BACKEND_GATE.md). M04.2 explicitly accepted as feasibility only; no index integration. ADR-006 still provisional, ADR-013 unchanged. No fresh device evidence, migration, shipping API recommendation or M04.3. Next: obtain owner permission for scoped inventory on SM-X626B; a separate matched diagnostic campaign and written API decision follow.
+On `feature/m04-scalable-renderer`, authorized inventory attempted at `677fa6c9d3c186bada279e1dddb85b659749bac2`; host-built probe sources `204997e0423082f6e85ca183b4b03121161ba6c9`. [Raw preflight, exact APK hash, scope and matched protocol](../reports/M04_BACKEND_GATE.md). APK hash matched; ADB listed zero devices. No install, launch or uninstall. Next: owner connects the intended tablet and confirms readiness; repeat identity/hash checks, then perform only the approved inventory. No benchmark authorization, migration, shipping API recommendation or M04.3. ADR-006 still provisional, ADR-013 unchanged.
 
 ## Prior M04.2 handoff
 

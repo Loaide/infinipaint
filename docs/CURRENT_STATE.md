@@ -7,7 +7,7 @@
 
 See [M03 formal acceptance](../reports/M03_ACCEPTED.md).
 
-M04.2 accepted for feasibility only. The [backend gate](../reports/M04_BACKEND_GATE.md) is open; a host-built capability probe awaits separate tablet authorization. No production GPU resource/scheduling architecture or migration ahead of that decision.
+M04.2 accepted for feasibility only. At the [backend gate](../reports/M04_BACKEND_GATE.md), the inventory is authorized but ADB listed no tablet; probe not installed. No production GPU resource/scheduling architecture or migration ahead of the selection decision.
 
 ---
 
