@@ -1,6 +1,6 @@
-# M04 backend selection open — authorized inventory blocked: no tablet transport
+# M04 backend gate — campaign complete; native Vulkan candidate pending owner decision
 
-On `feature/m04-scalable-renderer`, authorized inventory attempted at `677fa6c9d3c186bada279e1dddb85b659749bac2`; host-built probe sources `204997e0423082f6e85ca183b4b03121161ba6c9`. [Raw preflight, exact APK hash, scope and matched protocol](../reports/M04_BACKEND_GATE.md). APK hash matched; ADB listed zero devices. No install, launch or uninstall. Next: owner connects the intended tablet and confirms readiness; repeat identity/hash checks, then perform only the approved inventory. No benchmark authorization, migration, shipping API recommendation or M04.3. ADR-006 still provisional, ADR-013 unchanged.
+`feature/m04-scalable-renderer`, inspected `f25961daf457aafae5d0732b58dbe751878e8fe3`. Owner-reported benchmark source `8f9b53044d240f413f10f69a61aafe35fa02c350`, local APK/archive hashes verified; exact installed-image/source linkage not independently proven. Preserve benchmark checkpoint, host timeout (`ab0541a`) and captures. [Gate decision request and targeted validation](../reports/M04_BACKEND_GATE.md); [compact evidence](../reports/M04_BACKEND_EVIDENCE_COMPACT.md). M03 tested application unchanged. Next: owner disposition of native Vulkan + compact instances and outstanding capacity/lifecycle/thermal/peak checks. Do not repeat the campaign, start migration or enter M04.3. ADR-006 remains provisional; ADR-013 unchanged.
 
 ## Prior M04.2 handoff
 

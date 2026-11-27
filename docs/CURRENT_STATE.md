@@ -7,7 +7,7 @@
 
 See [M03 formal acceptance](../reports/M03_ACCEPTED.md).
 
-M04.2 accepted for feasibility only. At the [backend gate](../reports/M04_BACKEND_GATE.md), the inventory is authorized but ADB listed no tablet; probe not installed. No production GPU resource/scheduling architecture or migration ahead of the selection decision.
+M04.2 accepted for feasibility only. The [matched backend gate](../reports/M04_BACKEND_GATE.md) recommends native Vulkan with compact instancing; owner decision pending. Capacity, lifecycle recovery, sustained thermal behavior and peak memory are unproven. No production migration or M04.3.
 
 ---
 

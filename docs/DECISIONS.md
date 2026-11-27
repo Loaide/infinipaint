@@ -18,4 +18,4 @@ Pre-M01 update: repository identity is verified and M00.5 compilation repair acc
 
 ## Open decision — M04 graphics backend (not an approved ADR)
 
-M04.2 accepted for feasibility only. [Selection gate](../reports/M04_BACKEND_GATE.md) open: measure highest reliably supported GLES against native Vulkan and retain GLES2/v1 compatibility. ADR-006 remains provisional. Host build evidence is not tablet capability or a shipping API choice. Owner approval required before production GPU resource/scheduling design, backend migration or M04.3.
+M04.2 accepted for feasibility only. [Selection gate](../reports/M04_BACKEND_GATE.md): matched tablet evidence favors native Vulkan with compact instancing for CPU headroom and suffix size, not improved display latency. Recommendation pending; ADR-006 is not superseded by approval. Retain GLES2/v1 compatibility. Owner approval required before production GPU resource/scheduling design, backend migration or M04.3.

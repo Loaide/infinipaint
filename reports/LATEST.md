@@ -1,6 +1,6 @@
 # M03 accepted — latest milestone status
 
-M04 [backend selection gate](M04_BACKEND_GATE.md) open; authorized inventory stopped before installation: no ADB device. [M04.2](M04_2_DATA_ACCESS.md) accepted as feasibility, not production scalability. [HOST_02 findings](M04_HOST_02.md) accepted, v1 retained. [Binding conditions](../docs/M04_PROPOSAL.md) stand. M03 is formally accepted with documented limitations.
+M04 [backend recommendation](M04_BACKEND_GATE.md) pending owner approval: native Vulkan with compact instancing, based on the owner's completed matched campaign. [M04.2](M04_2_DATA_ACCESS.md) accepted as feasibility, not production scalability. [HOST_02 findings](M04_HOST_02.md) accepted, v1 retained. [Binding conditions](../docs/M04_PROPOSAL.md) stand. M03 is formally accepted with documented limitations.
 
 See [formal acceptance](M03_ACCEPTED.md) and
 [engineering closure](M03_ACCEPTANCE.md).
