@@ -1,6 +1,6 @@
 # M03 accepted — latest milestone status
 
-M04 [bounded data-access checkpoint](M04_2_DATA_ACCESS.md) complete on host: validated reopen, corruption controls, matched file-backed spatial queries and sparse order. Stop at backend selection before production GPU resource/scheduling design. [HOST_02 findings](M04_HOST_02.md) accepted, v1 retained. [Binding conditions](../docs/M04_PROPOSAL.md) stand. M03 is formally accepted with documented limitations.
+M04 [backend selection gate](M04_BACKEND_GATE.md) open; isolated capability probe built on host only. [M04.2](M04_2_DATA_ACCESS.md) accepted as feasibility, not production scalability. [HOST_02 findings](M04_HOST_02.md) accepted, v1 retained. [Binding conditions](../docs/M04_PROPOSAL.md) stand. M03 is formally accepted with documented limitations.
 
 See [formal acceptance](M03_ACCEPTED.md) and
 [engineering closure](M03_ACCEPTANCE.md).

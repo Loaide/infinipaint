@@ -1,4 +1,8 @@
-# M04.2 — host data feasibility complete; stop at backend selection
+# M04 backend selection open — waiting for separate device authorization
+
+On `feature/m04-scalable-renderer`, inspected `5ee7fca9c942c8fc71a2e4175bebcb5f44070656`; host-built probe sources `204997e0423082f6e85ca183b4b03121161ba6c9`. [Evidence, exact APK hash, scope and matched protocol](../reports/M04_BACKEND_GATE.md). M04.2 explicitly accepted as feasibility only; no index integration. ADR-006 still provisional, ADR-013 unchanged. No fresh device evidence, migration, shipping API recommendation or M04.3. Next: obtain owner permission for scoped inventory on SM-X626B; a separate matched diagnostic campaign and written API decision follow.
+
+## Prior M04.2 handoff
 
 Branch `feature/m04-scalable-renderer`; inspected and measured WIP `610202e00b912ea0a889a01a9fa2b2972bdc9f8c` descends from `3590abe26167693cbce06f1720e580c2a89b8442`, diagnostics only. [M04.2 findings, limits and decision](../reports/M04_2_DATA_ACCESS.md) · [host output](../reports/M04_2_HOST_RESULTS.txt). Accepted M03 app `d543ed4a0ab4dd0e760ae4ebdb5a616043f88a8f` unchanged. Owner accepted HOST_02: retain v1/GLES2; subpixel and temporal obligations open, no more AA trials now. M04.2 was authorized for host feasibility only. Full validation remains required; 65,536 samples/record admission, dot-heavy 100k maximum, unbounded index builds and missing physical peaks constrain the result. ADR-003/004/006–010/012/013 unchanged.
 

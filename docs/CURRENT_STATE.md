@@ -7,7 +7,7 @@
 
 See [M03 formal acceptance](../reports/M03_ACCEPTED.md).
 
-Next is the owner-gated matched-device backend comparison (highest reliable GLES vs native Vulkan; GLES2 compatibility). No production GPU resource/scheduling architecture or migration ahead of that decision.
+M04.2 accepted for feasibility only. The [backend gate](../reports/M04_BACKEND_GATE.md) is open; a host-built capability probe awaits separate tablet authorization. No production GPU resource/scheduling architecture or migration ahead of that decision.
 
 ---
 

@@ -15,3 +15,7 @@ Pre-M01 update: repository identity is verified and M00.5 compilation repair acc
 ## Approved M03 decision
 
 [ADR-013: document edits and durable revisions](M03_PROPOSAL.md). Owner approved proposal `1b71523179ce6c66b619f07dae1ea80e5755955e` with binding additions recorded there. Android platform SQLite; implementation and device acceptance are separate gates.
+
+## Open decision — M04 graphics backend (not an approved ADR)
+
+M04.2 accepted for feasibility only. [Selection gate](../reports/M04_BACKEND_GATE.md) open: measure highest reliably supported GLES against native Vulkan and retain GLES2/v1 compatibility. ADR-006 remains provisional. Host build evidence is not tablet capability or a shipping API choice. Owner approval required before production GPU resource/scheduling design, backend migration or M04.3.
