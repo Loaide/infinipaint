@@ -141,7 +141,8 @@ class Campaign:
         while time.monotonic()<deadline:
             p=sp.run(self.prefix+["exec-out","run-as",PKG,"cat","files/"+filename],capture_output=True,timeout=15)
             text=p.stdout.decode(errors="replace").strip()
-            if p.returncode==0 and text and text.startswith(prefix):return text
+            valid = (text == "ok" or text.startswith("fail ")) if prefix == "" else bool(text and text.startswith(prefix))
+            if p.returncode==0 and valid:return text
             if monitor and time.monotonic()>=next_sample:
                 monitor();next_sample=time.monotonic()+20
             time.sleep(.5)
@@ -157,14 +158,16 @@ class Campaign:
         require(not re.search(r"vk teardown explicit_buffer_allocated=[1-9]\d*",txt),"explicit Vulkan allocation leak")
         return txt
 
-    def run(self,mode,scene,frames=360,timer=1,thermal=False):
+    def run(self,mode,scene,frames=360,timer=1,thermal=False,landscape=False):
         self.index+=1
-        dest=self.out/f"{self.index:03d}-{mode}-{scene}-n{frames}-t{timer}"
+        require(not landscape or (scene=="life-pixel" and frames==1 and timer==0),"landscape is lifecycle reference only")
+        dest=self.out/f"{self.index:03d}-{mode}-{scene}-n{frames}-t{timer}{'-landscape' if landscape else ''}"
         dest.mkdir()
         print(f"[{self.index}] {mode} {scene} {frames} frames",flush=True)
         self.monitor(dest/"monitor.txt",refresh=True)
         self.adb("shell","am","start","-S","-n",PKG+"/.Bench","--es","api",mode,"--es","scene",scene,
-                 "--ei","frames",str(frames),"--ei","timer",str(timer),"--ei","run",str(self.index))
+                 "--ei","frames",str(frames),"--ei","timer",str(timer),"--ei","run",str(self.index),
+                 *( ("--ez","landscape", "true") if landscape else () ))
         # For a 55k-frame run, sample thermal and refresh in-run; PSS probes are sparse and recorded.
         receipt=self.receipt("status",str(self.index)+" ",time.monotonic()+(1000 if thermal else 90),
                              (lambda:self.monitor(dest/"monitor.txt",refresh=True,mem=True)) if thermal else None)
@@ -175,8 +178,8 @@ class Campaign:
         require(ident[:2]==[mode,scene] and len(ident)==5,"stale/invalid identity")
         (dest/"identity.txt").write_text(" ".join(ident)+"\n")
         size=tuple(map(int,ident[2:4]))
-        require(size==(1800,2880),"unexpected benchmark surface size")
-        key=scene.removeprefix("pixel-")
+        require(size==((2880,1800) if landscape else (1800,2880)),"unexpected benchmark surface size")
+        key=scene.removeprefix("pixel-")+("-landscape" if landscape else "")
         require(self.identities.setdefault(key,ident[2:])==ident[2:],"fixture or size mismatch")
         raw=self.pull("frames.csv").decode()
         (dest/"frames.csv").write_text(raw)
@@ -239,7 +242,12 @@ class Campaign:
         return max(passing)[1]
 
     def lifecycle(self):
-        ref=self.run("g2","life-pixel",1,0)
+        # Fresh same-backend and compatibility references at BOTH physical extents.
+        # Neither cross-extent equality nor previous recovered pixels are an oracle.
+        refs={}
+        for landscape in (True,False):
+            refs[landscape]={m:self.run(m,"life-pixel",1,0,landscape=landscape) for m in ("g2","vki")}
+        require(self.identities["life-pixel"][-1]==self.identities["life-pixel-landscape"][-1],"fixture differs across extents")
         dest=self.out/"lifecycle";dest.mkdir()
         self.monitor(dest/"monitor.txt",refresh=True,mem=True)
         self.adb("shell","am","start","-S","-n",PKG+"/.Lifecycle")
@@ -259,32 +267,35 @@ class Campaign:
         logs=self.log(dest/"backend.log")
         require(result=="ok","lifecycle failed: "+result)
         require(logs.count("vk teardown waitIdle=0")>=4,"lifecycle teardown receipts missing")
-        deltas={}
+        # Collect every stage first. Preserve raw data even when an image later fails.
+        recovered={}
         for i in range(4):
             sub=dest/f"stage{i}";sub.mkdir()
             require(self.pull(f"life/stage{i}.ok").strip()==b"ok","stage receipt missing")
             ident=self.pull(f"life/stage{i}/identity.txt").decode().strip().split()
             (sub/"identity.txt").write_text(" ".join(ident)+"\n")
-            require(ident[0]=="vki" and ident[-1]==self.identities["life-pixel"][-1],"lifecycle fixture changed")
+            expected_scene="life-live" if i==0 else "life-pixel"
+            key="life-pixel-landscape" if i==1 else "life-pixel"
+            require(len(ident)==5 and ident[:2]==["vki",expected_scene] and ident[2:]==self.identities[key],"lifecycle fixture or extent changed")
             frames=self.pull(f"life/stage{i}/frames.csv");(sub/"frames.csv").write_bytes(frames)
+            rows=list(csv.DictReader(io.StringIO(frames.decode())))
             if i==0:
-                rows=list(csv.DictReader(io.StringIO(frames.decode())))
-                require(len(rows)==8 and all(int(r["upload_bytes"])==28 for r in rows),"suffix replay incomplete")
+                require([int(r["seq"]) for r in rows]==list(range(1,9)) and all(int(r["upload_bytes"])==28 for r in rows),"suffix replay incomplete")
             else:
-                img=self.pixels(f"life/stage{i}/pixels.rgba",sub/"pixels.rgba.gz",ident)
-                if i==1:
-                    require(img.shape[:2]==(1800,2880),"landscape surface not verified")
-                    # All fixed fixture ink fits inside common rectangle. Check common image and blank extra region.
-                    h,w=1800,1800
-                    delta=self.compare(ref[:h,:w],img[:h,:w])
-                    extra=img[:,w:]
-                    blank=np.broadcast_to(ref[0,0],extra.shape)
-                    delta=max(delta,self.compare(extra,blank))
-                else:delta=self.compare(ref,img)
-                deltas[str(i)]=delta
-                require(delta<=2,"recovered pixels mismatch")
-        write_json(dest/"parity.json",deltas)
-        print("    lifecycle pixel deltas "+str(deltas),flush=True)
+                require(len(rows)==1 and int(rows[0]["upload_bytes"])==0,"unexpected recovery frame")
+                recovered[i]=self.pixels(f"life/stage{i}/pixels.rgba",sub/"pixels.rgba.gz",ident)
+        deltas={
+            "fresh_vki_vs_g2_portrait":self.compare(refs[False]["vki"],refs[False]["g2"]),
+            "fresh_vki_vs_g2_landscape":self.compare(refs[True]["vki"],refs[True]["g2"]),
+        }
+        for i,img in recovered.items():
+            deltas[f"stage{i}_vs_fresh_vki"]=self.compare(refs[i==1]["vki"],img)
+            deltas[f"stage{i}_vs_g2"]=self.compare(refs[i==1]["g2"],img)
+        deltas["portrait_after_background_vs_after_rotation"]=self.compare(recovered[2],recovered[3])
+        failed={k:v for k,v in deltas.items() if v>2}
+        write_json(dest/"parity.json",{"max_channel_delta":deltas,"threshold":2,"failed":failed,"pass":not failed})
+        print("    lifecycle matched-extent pixel deltas "+str(deltas),flush=True)
+        require(not failed,"matched-extent parity failed: "+str(failed))
 
     def execute(self):
         try:
