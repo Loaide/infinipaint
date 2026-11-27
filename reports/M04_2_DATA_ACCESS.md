@@ -1,0 +1,51 @@
+# M04.2 — bounded data-access feasibility; stop at backend selection
+
+**Recommendation:** keep full v1 validation before selection. Prefer spatially packed pages for the read-mostly base in the next data design, **not** an all-document dynamic binary tree. Do not integrate either prototype yet. The packed tree reduced page reads on sparse views; its own leaf overlap grew materially with document size. Sparse order lookup and validated open are now distinct, measurable costs, not work to put on the camera thread.
+
+**Identity and evidence.** `feature/m04-scalable-renderer`; resumed the existing WIP `610202e00b912ea0a889a01a9fa2b2972bdc9f8c` rather than rebuilding the experiment design. Verified ancestry from `3590abe26167693cbce06f1720e580c2a89b8442`; inspected diff: `diagnostics/{m04_reopen.cpp,m04_data.py,m04_tree.cpp,run_m04_host.py}` only. Interfaces inspected: `native_bridge.cpp` (`appendV1`, `finishV1`, `reconstructV1`), document codec/restore and `DocumentDatabase.java` v1 DDL/loader. Reused the [M03 contract](../docs/M03_CONTRACT.md), [M03 measurements](M03_ACCEPTANCE.md) and accepted [coverage result](M04_HOST_02.md); none of those campaigns reran.
+
+Preflight free bytes C: 912,728,064 / D: 35,747,389,440; used a private temporary directory on D: (`TEMP` and `TMP` under ignored `captures/m042-tmp`). Ran the existing `python diagnostics/run_m04_host.py --data` once to completion, MSVC x64 `/O2` developer prompt, host JDK 17, Intel i5-6300U, SQLite 3.45.1. No app or driver benchmark. [Complete result lines](M04_2_HOST_RESULTS.txt); original local build/run stdout `captures/m042-data-610202e-run1.txt`, SHA-256 `90cd0fec9203b6d96e8da1ec95e351ae2b0ab80005fdd882e2d6e336e033319b`.
+
+## What was validated
+
+- Generated private SQLite v1 catalogs using the app's table definitions and canonical little-endian header/sample layout. In a coherent read-only transaction both readers check format, selection, camera, count, ceiling/identity, endpoints, reciprocal chain, typed record revisions and foreign keys; decode bounded chunks with ordinal, length, numerical and cross-chunk timestamp checks; verify SHA-256 over header and ordered sample bytes. One reader walks payloads by link; the other still validates the whole chain but streams payload cursors by primary key. Neither trusts a derived file or skips offscreen ink. No writes to app data or changes to M03 commit, retry, switch or acknowledgment semantics.
+- Replayed actual v1 input/spline code. Released emitted mesh prefixes while retaining filter/spline state for **one admitted record**, resolved the provisional tail and final connector/disc once, then applied the v1 translation. Outward-rounded boxes conservatively enclose groups of ≤16 consecutive *emitted v1 capsule descriptors*: endpoints, max radius, worst supported AA padding and float arithmetic guard. They are not bounds for arbitrary future analytic LOD. At 1k, compared first-vertex descriptors of every six-vertex quad byte-for-byte with full `reconstructV1`, and checked covered cross-sections against their box. This is not an extreme-coordinate proof.
+- Both paths rejected seven injected faults each: offscreen digest, wrong predecessor, chunk ordinal gap, **rehashed** decreasing time across chunks, **rehashed** unsupported recipe, impossible revision, unknown format. Prior exported span bytes stayed unchanged; restored source passed again. Temporary rank/spool files are diagnostics, **not** a crash-atomic multi-file publication protocol; no interrupted-switch, full-storage or concurrent editor campaign here.
+
+## Reopen and reconstruction
+
+Deterministic blocks of 256 anchors, permuted/gapped IDs (`13792` offset); visible footprint held fixed as blocks were added. At 100k: **96,483 dots**, 3,125 eight-sample pressure paths, 391 diagonals of 65 samples, one 1,850-sample two-chunk record with a timestamp tie at the boundary. Same recipe at smaller sizes; each size contains one long record. Not a realistic million-stroke handwriting or dense translucent scene.
+
+|Records|Wire bytes (headers + samples)|Keyed / scan elapsed s|Native replay-call portion s, keyed / scan|Process read bytes, keyed / scan|
+|---:|---:|---:|---:|---:|
+|1k|199,844|0.065 / 0.056|0.029 / 0.025|866,682 / 482,622|
+|10k|1,397,600|0.755 / 0.452|0.197 / 0.134|97,352,198 / 51,245,908|
+|100k|13,354,928|10.416 / 6.262|1.980 / 1.513|1,927,694,677 / 1,046,437,628|
+
+Fresh reader processes, 512 KiB source cache, mmap off; separate 512 KiB rank DB. Timings include validation and rank construction; keyed also writes the span spool, scan normally counts it without writing. 1k additionally runs the full-replay oracle. Single run per mode/size, keyed first, OS cache not purged. Process I/O includes rank scratch and is not physical media traffic. At 100k the source occupied 31,956,992 B; the large read-to-file ratio is a reason to investigate link traversal and rank access separately, not to skip validation. **6.262 s is not a cold viewport latency or Android reopen prediction.**
+
+At 100k: 152,265 quads → 101,679 span entries. Reported per-trace retained high **613,664 B** at all three sizes (same longest record). 100k scan working set sampled from 22,937,600 to 24,776,704 B; this misses short-lived allocation/retirement peaks. Chunks ≤65,520 wire bytes. Replay admission is **65,536 samples per record**, with 8 MiB mesh allowance and `65536 × 640` scratch allowance; not support for every legal v1 record (format max 1M samples). Retained filter/spline state still grows with admitted stroke length. Larger records must fail safely, not truncate; the run did not test the admission boundary itself. True bounded restartable reconstruction of very long records remains open.
+
+## Matched index and order results
+
+4 KiB pages, same 1 MiB 64-set/4-way application cache, same span stream, inclusive bounds. Compared 85-way STR bulk packing with incremental paint-order AABB insertion, perimeter-growth descent and local height rotations. Empty the application cache per query, then repeat the exact view. **Cold means application-cache cold only.** Traversal+emission timing excludes allocation warmup, sorting, oracle, eviction reset and rank service. Below: 128 views per size (some repeat); **67 spans / 65 distinct IDs** throughout.
+
+|Records|Packed / binary median nodes|Packed / binary median pages read, cold|Cold p50 / p95 µs: packed; binary|Repeat p50 / p95 µs: packed; binary|
+|---:|---:|---:|---|---|
+|1k|4 / 241|4 / 16|49 / 77; 133 / 182|2.3 / 5.0; 5.0 / 6.7|
+|10k|9 / 265|9 / 33|52.5 / 117; 185 / 344|2.9 / 5.7; 4.1 / 8.8|
+|100k|19 / 277|19 / 48|126 / 200; 345 / 588|6.8 / 15.4; 104 / 193|
+
+100k cold p99/max: packed 236/305 µs, binary 840/841 µs. Median read 77,824 vs 196,608 B; packed repeat zero reads, binary repeat still 12 (cache conflicts, not proof against other binary layouts). Packed node work **4→19**, exceeding the proposed 4× investigation threshold; leaf tests 255→1,190 at constant output, consistent with overlap of packed stripes in this long thin layout. Binary tested 88 leaf spans at 100k but traversed many internal nodes. 100k full-block p95 was essentially tied (475 vs 471 µs, 16 queries). Don't generalize the sparse winner to every distribution.
+
+At every size both trees matched the linear oracle's exact span ordinals and IDs on 192 initial views (sparse, edge contact, gaps, full blocks) cold and repeated; 194 views after translating one span by +1024 X, including vacated/acquired endpoints. At 100k, that edit visited 7 vs 121 lookup nodes and wrote **3 vs 14 pages** (12,288 vs 57,344 B, **384× vs 1,792×** a 32 B changed box). This is file refit/flush, not durable commit or amortized reinsert/compaction cost; no grouped split/undo storm tested.
+
+At 100k: build **57.5 vs 64.3 ms**, file **4,968,448 vs 11,411,456 B**, builder vectors **4,938,048 vs 11,387,992 B** plus **4,067,160 B** input and serialization scratch. Both prototype builds keep all spans; *not bounded external builds*. Query cache ledger 1,052,712 B, frontier 676 B, emitted-hit capacity 4,160 B on these views. Output scratch is not bounded for arbitrary overlap. No 1M, device memory, physical cold storage or GPU evidence.
+
+**Exact sparse order:** ID-keyed SQLite locators assigned `(leaf,slot)` by the validated link walk, not by ID. Resolve all hits against `(UUID,session,revision)` before returning a sorted result. All 65 exported numeric-sorted IDs matched the independent fixture permutation order at each size. Missing ID, stale session and superseded revision were rejected; moving tail just after head in one derived transaction used one reserved slot and an 8,272 B WAL. Rank DB 24,576 / 143,360 / 1,458,176 B; warm median **746 / 715 / 723 µs** (31 repetitions). At 100k this host/Python per-ID SQL path takes longer than the warm spatial query and exceeds the proposed 0.30 ms order allocation. First timing isn't genuinely cold (rejection probes ran first). No proof for exhausted slots, arbitrary splices, relabeling, or racing root changes.
+
+## Decision and stop
+
+Retain packed base plus *possible* small dynamic overlay as a hypothesis. External build, fewer overlapping leaves, batched rank reads, bounded long-record replay and integrity-preserving publication need evidence before integration. M03 tail-latency and physical peak-memory obligations remain; v1 is the compatibility renderer, with subpixel coverage and temporal stability still open.
+
+**Next is an explicit graphics backend selection gate, not production GPU resource or scheduling design.** With separate device authorization, identify the highest **reliably supported** GLES version on the reference tablet and compare it with native Vulkan on matched workloads; keep GLES2 as compatibility control. Hold inputs, paths, ordered pixels, error, display mode and thermal protocol fixed; compare actual presentation tails, CPU submission, GPU timings where available, uploads, peak memory, cold start and context/device-loss recovery. Expose unavailable metrics and implementation cost. Decide with the owner before committing to production GPU ownership/scheduling; no backend migration without explicit approval. No backend selected, implemented or tested by M04.2.

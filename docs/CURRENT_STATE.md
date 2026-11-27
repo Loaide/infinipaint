@@ -2,12 +2,12 @@
 
 - M00, M00.5, M01 and M02: accepted.
 - M03: formally accepted with documented limitations.
-- M04: [direction approved in principle with conditions](M04_PROPOSAL.md); [host coverage checkpoint](../reports/M04_HOST_02.md) complete. No production implementation.
+- M04: [direction approved in principle with conditions](M04_PROPOSAL.md); HOST_02 findings accepted; [M04.2 bounded host data feasibility](../reports/M04_2_DATA_ACCESS.md) complete. No production implementation.
 - M05, M06 and M07: upcoming.
 
 See [M03 formal acceptance](../reports/M03_ACCEPTED.md).
 
-Next action is an owner decision on independently testing bounded validated reopen. Fixed 8×8 coverage is not a v1 replacement.
+Next is the owner-gated matched-device backend comparison (highest reliable GLES vs native Vulkan; GLES2 compatibility). No production GPU resource/scheduling architecture or migration ahead of that decision.
 
 ---
 

@@ -1,10 +1,16 @@
-# M04 — second bounded host checkpoint complete; stop for owner
+# M04.2 — host data feasibility complete; stop at backend selection
+
+Branch `feature/m04-scalable-renderer`; inspected and measured WIP `610202e00b912ea0a889a01a9fa2b2972bdc9f8c` descends from `3590abe26167693cbce06f1720e580c2a89b8442`, diagnostics only. [M04.2 findings, limits and decision](../reports/M04_2_DATA_ACCESS.md) · [host output](../reports/M04_2_HOST_RESULTS.txt). Accepted M03 app `d543ed4a0ab4dd0e760ae4ebdb5a616043f88a8f` unchanged. Owner accepted HOST_02: retain v1/GLES2; subpixel and temporal obligations open, no more AA trials now. M04.2 was authorized for host feasibility only. Full validation remains required; 65,536 samples/record admission, dot-heavy 100k maximum, unbounded index builds and missing physical peaks constrain the result. ADR-003/004/006–010/012/013 unchanged.
+
+**Next action:** owner reviews M04.2 and authorizes a matched-device comparison plan for the **highest reliably supported GLES version vs native Vulkan**, with GLES2 as compatibility reference. Stop **before** production GPU resource and scheduling architecture. No device actions or backend migration without explicit authorization; no production index approved. Preserve the two known untracked M02 captures.
+
+## Prior checkpoint — HOST_02
 
 On `feature/m04-scalable-renderer`, proposal `7cb54e5f3199ae47f1e9d85e3f8ad452a3b7aba5` approved in principle with [four binding conditions](M04_PROPOSAL.md). Inspected checkpoint `96757ba2497274da9a176ef2d524c9964427699b`; host probe and conditions at `c870534a38ba3f5c2f9b604c89931c30b07f10b9`. [Measured host results and limits](../reports/M04_HOST_01.md). M03 tested app `d543ed4a0ab4dd0e760ae4ebdb5a616043f88a8f` unchanged. ADR-003/004/006–010/012/013 standing unchanged.
 
 Owner authorized only the focused host coverage comparison. Inspected `0eec300a10e72cc55131d4fac6cb6ea364ef44e9`; measured sources `9576bbfd9c786984fbcd1df68515f973dd54b9dc`. [Second checkpoint](../reports/M04_HOST_02.md): shared samples preserve ordering/correlation but fixed 8×8 fails accuracy, continuity and v1 compatibility. No production change.
 
-**Next action:** owner reviews the result and decides whether to authorize a separate bounded, integrity-preserving validated-reopen/paging probe. No paging, device run or further checkpoint authorized. Dense/cold feasibility, telemetry overhead bound, finite v1 precision, physical peak and latency tails remain open. Keep the two known untracked M02 presentation captures untouched.
+That host-only data probe was subsequently authorized and completed above. Dense/cold feasibility, telemetry overhead bound, finite v1 precision, physical peak and latency tails remain open.
 
 ## M03 accepted — prior handoff
 
