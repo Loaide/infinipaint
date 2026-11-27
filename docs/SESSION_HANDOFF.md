@@ -1,4 +1,10 @@
-# M03 accepted — handoff to M04
+# M04.0 — proposal ready for written owner decision
+
+On `feature/m04-scalable-renderer`, review [M04 proposal](M04_PROPOSAL.md) at `7cb54e5f3199ae47f1e9d85e3f8ad452a3b7aba5`. Inspected accepted main `d79105f52109970e807f3cabd35fda24a269a63c`; M03 tested app `d543ed4a0ab4dd0e760ae4ebdb5a616043f88a8f` remains the application evidence anchor. No app/build/harness changes or new test run. Both independent architecture reviews informed the proposal. ADR-003/004/006–010/012/013 standing unchanged.
+
+**Next action:** owner reviews the final decision list, workload envelope and ordered checkpoints. Wait for written scope/authorization before implementation or device work. Dense/cold feasibility, finite v1 precision, physical peak and latency tails are open, not passes. Keep the two known untracked M02 presentation captures untouched.
+
+## M03 accepted — prior handoff
 
 M03 engineering closure and written owner acceptance are complete.
 

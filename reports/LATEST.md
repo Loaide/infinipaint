@@ -1,6 +1,6 @@
 # M03 accepted — latest milestone status
 
-M03 is formally accepted with documented limitations.
+M04.0 [architecture proposal](../docs/M04_PROPOSAL.md) is at the owner gate; no new application measurements. M03 is formally accepted with documented limitations.
 
 See [formal acceptance](M03_ACCEPTED.md) and
 [engineering closure](M03_ACCEPTANCE.md).
