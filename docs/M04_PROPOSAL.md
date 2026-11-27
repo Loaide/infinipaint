@@ -1,5 +1,7 @@
 # M04.0 decision request: editable ink at tablet scale
 
+**Owner disposition of `7cb54e5f` (binding):** direction approved in principle. Bring small dense-scene/coverage viability tests into the first checkpoint, before major paging. Investigate bounded validated reopen without weakening M03 integrity; a different integrity protocol needs separate approval. 150 ms is an initial genuinely cold viewport diagnostic, not acceptable routine navigation. Grow observability subsystem by subsystem, starting with minimal end-to-end attribution, measured overhead and thread-isolation probes. Only the first bounded **host** checkpoint is authorized. These conditions take precedence over the original sequence below; all other constraints stand.
+
 **Recommendation:** page the *vectors*, certify their projected error, and schedule only work that can change the next presentation. Keep SQLite v1 and GLES2 as authorities for document semantics and reference appearance respectively. Experiment with GLES3 instancing; do not select a shipping backend yet. Millions **stored and editable** is a capacity target, not a constant bound on the number of independently visible translucent marks drawable in 11.11 ms. Approval of a design is not evidence that a particular workload fits.
 
 ## Baseline and scope

@@ -383,14 +383,20 @@ void comparePortableRamp() {
 }
 } // namespace
 
+#ifdef IP_M04_HOST
+#include "m04_host_probe.hpp"
+#endif
+
 int main() {
     Pbuffer pbuffer;
     const auto* version = reinterpret_cast<const char*>(glGetString(GL_VERSION));
     const auto* renderer = reinterpret_cast<const char*>(glGetString(GL_RENDERER));
     check(version && renderer, "missing GL version or renderer");
     std::printf("GL_VERSION=%s GL_RENDERER=%s\n", version, renderer);
+#ifndef IP_M04_HOST
     check(std::strncmp(version, "OpenGL ES 2.0", 13) == 0,
           "expected GLES 2.0 (set MESA_GLES_VERSION_OVERRIDE=2.0)");
+#endif
     glDisable(GL_DITHER);
 
     Java_com_infinipaint_demo_NativeBridge_contextCreated(nullptr, nullptr);
@@ -401,6 +407,9 @@ int main() {
     Java_com_infinipaint_demo_NativeBridge_resizeViewport(nullptr, nullptr, width, height);
     Java_com_infinipaint_demo_NativeBridge_setCamera(nullptr, nullptr, 0, 0, 1);
     Java_com_infinipaint_demo_NativeBridge_setSmoothingPreset(nullptr, nullptr, 0);
+#ifdef IP_M04_HOST
+    return m04Probe();
+#endif
 
     const auto blank = render(raw);
     GLint program = 0, linked = GL_FALSE;
