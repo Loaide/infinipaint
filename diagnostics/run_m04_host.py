@@ -10,10 +10,15 @@ import shutil
 import subprocess as sp
 import tempfile
 import argparse
+import sys
 
 parser = argparse.ArgumentParser(description=__doc__)
-parser.add_argument("--coverage", action="store_true", help="run only bounded M04 coverage comparison")
-coverage = parser.parse_args().coverage
+mode = parser.add_mutually_exclusive_group()
+mode.add_argument("--coverage", action="store_true", help="run only bounded M04 coverage comparison")
+mode.add_argument("--data", action="store_true", help="bounded canonical replay and tree comparison")
+mode.add_argument("--reopen", action="store_true", help="only the 1k reopen and corruption controls")
+args = parser.parse_args()
+coverage = args.coverage
 
 repo = Path(__file__).resolve().parents[1]
 cpp = repo / "app/src/main/cpp"
@@ -36,6 +41,17 @@ with tempfile.TemporaryDirectory() as directory:
         assert symbols, dll
         (t / (name + ".def")).write_text("LIBRARY " + name + ".dll\nEXPORTS\n" + "\n".join(symbols))
         sp.run(["lib", "/nologo", "/machine:x64", "/def:" + name + ".def"], cwd=t, check=True)
+    if args.data or args.reopen:
+        sp.run(["cl", "/nologo", "/std:c++20", "/O2", "/EHsc", "/utf-8", "/DNOMINMAX",
+                "/LD", "/I.", "/I" + str(cpp), "/I" + str(jdk), "/I" + str(jdk / "win32"),
+                diag / "m04_reopen.cpp", *cpp.glob("document/*.cpp"), *cpp.glob("input/*.cpp"),
+                cpp / "stroke/spline.cpp", "libGLESv2.lib", "/Fe:replay.dll"], cwd=t, check=True)
+        if args.data:
+            sp.run(["cl", "/nologo", "/std:c++20", "/O2", "/EHsc", "/utf-8",
+                    diag / "m04_tree.cpp", "/Fe:tree.exe"], cwd=t, check=True)
+        sp.run([sys.executable, "-u", diag / "m04_data.py", t, driver,
+                *(["controls"] if args.reopen else [])], cwd=t, check=True)
+        sys.exit(0)
     # Insert only into a disposable copy. Fail if a source anchor moved.
     src = (cpp / "native_bridge.cpp").read_text(encoding="utf-8")
     hooks = [
