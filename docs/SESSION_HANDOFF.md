@@ -1,8 +1,10 @@
-# M04 — first bounded host checkpoint complete; stop for owner
+# M04 — second bounded host checkpoint complete; stop for owner
 
 On `feature/m04-scalable-renderer`, proposal `7cb54e5f3199ae47f1e9d85e3f8ad452a3b7aba5` approved in principle with [four binding conditions](M04_PROPOSAL.md). Inspected checkpoint `96757ba2497274da9a176ef2d524c9964427699b`; host probe and conditions at `c870534a38ba3f5c2f9b604c89931c30b07f10b9`. [Measured host results and limits](../reports/M04_HOST_01.md). M03 tested app `d543ed4a0ab4dd0e760ae4ebdb5a616043f88a8f` unchanged. ADR-003/004/006–010/012/013 standing unchanged.
 
-**Next action:** owner reviews the subpixel counterexample and decides whether to authorize the focused host coverage comparison in the report. No paging, device run or further checkpoint authorized. Dense/cold feasibility, telemetry overhead bound, finite v1 precision, physical peak and latency tails remain open. Keep the two known untracked M02 presentation captures untouched.
+Owner authorized only the focused host coverage comparison. Inspected `0eec300a10e72cc55131d4fac6cb6ea364ef44e9`; measured sources `9576bbfd9c786984fbcd1df68515f973dd54b9dc`. [Second checkpoint](../reports/M04_HOST_02.md): shared samples preserve ordering/correlation but fixed 8×8 fails accuracy, continuity and v1 compatibility. No production change.
+
+**Next action:** owner reviews the result and decides whether to authorize a separate bounded, integrity-preserving validated-reopen/paging probe. No paging, device run or further checkpoint authorized. Dense/cold feasibility, telemetry overhead bound, finite v1 precision, physical peak and latency tails remain open. Keep the two known untracked M02 presentation captures untouched.
 
 ## M03 accepted — prior handoff
 

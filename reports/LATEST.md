@@ -1,6 +1,6 @@
 # M03 accepted — latest milestone status
 
-M04 [first host checkpoint](M04_HOST_01.md) measured attribution, isolation and dense coverage on software GLES. [Architectural direction](../docs/M04_PROPOSAL.md) approved in principle with binding conditions; no further work authorized. M03 is formally accepted with documented limitations.
+M04 [second host checkpoint](M04_HOST_02.md) compared one fixed shared-site coverage candidate against v1 and an independent area integral. Not viable as a v1 replacement. [First checkpoint](M04_HOST_01.md) and [binding conditions](../docs/M04_PROPOSAL.md) stand; no further work authorized. M03 is formally accepted with documented limitations.
 
 See [formal acceptance](M03_ACCEPTED.md) and
 [engineering closure](M03_ACCEPTANCE.md).
