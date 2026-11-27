@@ -50,7 +50,7 @@ def main():
     require(len(devices)==2 and devices[1].split()[1:]==["device"],"need exactly one online device")
     prefix=["adb","-s",devices[1].split()[0]]
     def adb(*cmd):
-        return sp.check_output(prefix+list(cmd),timeout=90)
+        return sp.check_output(prefix+list(cmd),timeout=300)
     require(adb("shell","getprop","ro.product.model").strip()==b"SM-X626B","wrong model")
     fingerprint=adb("shell","getprop","ro.build.fingerprint").strip()
     require(fingerprint==b"samsung/gts10fepxx/gts10fep:16/BP2A.250605.031.A3/X626BXXS7BZB7_OJM7BZB7:user/release-keys","build mismatch; stop")
