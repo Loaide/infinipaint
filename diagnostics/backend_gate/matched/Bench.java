@@ -9,9 +9,9 @@ import java.io.*;
 // Choreographer and graphics calls share a dedicated lane, never the UI looper.
 public final class Bench extends Activity implements SurfaceHolder.Callback {
     static { System.loadLibrary("matched"); }
-    private static native void start(Surface s,String api,String scene,String dir,int frames,int timer);
-    private static native boolean step(long vsync);
-    private static native void close();
+    static native void start(Surface s,String api,String scene,String dir,int frames,int timer);
+    static native boolean step(long vsync);
+    static native void close();
     private HandlerThread lane; private Handler handler;
     private volatile boolean gone; private boolean launched;
     @Override public void onCreate(Bundle b){

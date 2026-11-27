@@ -23,6 +23,7 @@ int64_t nowNs();
 bool detailEnabled(); // false for minimum-attribution overhead control
 class Backend {public:
     virtual ~Backend()=default;
+    virtual void sampleMemory(const char*) {}
     // Frame pixels for correctness only: full window top-left tightly packed RGBA8.
     virtual Metrics frame(const Frame&,std::vector<uint8_t>* pixels)=0;
 };

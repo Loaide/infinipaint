@@ -18,6 +18,14 @@
 
 Native Vulkan adds explicit swapchain, staging, synchronization and surface-loss ownership absent from the GLES adapter. Scope the recommendation to a tested hardware graphics/present queue, compatible blendable window format, memory types and validated lifecycle; no blanket Android support claim or compute dependency. **Stop for owner disposition before production GPU resource/scheduling work or M04.3.**
 
+## Owner-approved shortened follow-up — diagnostic only (not yet executed)
+
+The owner approved one sustained **VKI-only** thermal run instead of two matched ten-minute thermal runs. This deliberately gives up a sustained GLES/Vulkan thermal comparison. The existing 115-run evidence is retained. No production migration is approved.
+
+The targeted diagnostic adds bounded doubling sweeps of 16-chord synthetic strokes: separated 64-pixel grid cells (up to 1,024 strokes) and coincident translucent strokes (up to 2,048), with short screens followed by 1,000-frame boundary confirmations, untimed GLES2-reference pixel comparisons, and a single 55,000-frame Vulkan run at the tested passing load with highest p99 wall time. No claim of maximum capacity between tested steps or beyond the caps. Missing presentation feedback is unknown, not a missed slot or a pass. The fixture is the existing synthetic input path, not recorded real handwriting. Presentation is checked using reported actual-present timestamps and active display mode; independent FrameTimeline joining remains pending. In-run memory sampling can perturb pacing. No claim of strict instrumentation budget compliance.
+
+A separate diagnostic Activity appends eight chords, tears down the backend without drain frames, rotates to landscape and back, then backgrounds/resumes after surface destruction. It rebuilds the deterministic committed fixture and compares recovered pixels to the v1 reference. This is teardown-first replay, not production scene publication, device-loss recovery or old/new swapchain overlap. Memory evidence includes sampled process PSS/RSS, VmHWM and Vulkan heap budget/usage plus explicit buffer allocation peaks; implicit swapchain/driver peaks are not established. The build records Git HEAD, input hashes, toolchain and signer; campaign verifies installed APK hash if shell permits. Previous APK provenance remains unresolved. The patch has not been built with the Android SDK or run on the device at authoring time.
+
 ## Historical preflight and original protocol (superseded status)
 
 **Authorized inventory attempt — blocked at identity preflight.** On `feature/m04-scalable-renderer` at `677fa6c9d3c186bada279e1dddb85b659749bac2`, inspected this gate, handoff, state and decision register. The local APK SHA-256 matched the authorized artifact below. Raw `adb devices -l` stdout (header followed by an empty line):

@@ -59,7 +59,7 @@ static_assert(sizeof(Push) == 32);
 struct Buffer {
     VkBuffer handle{};
     VkDeviceMemory memory{};
-    VkDeviceSize capacity{};
+    VkDeviceSize capacity{}, allocation{};
     void* mapping{};
     bool coherent{};
 };
@@ -82,6 +82,7 @@ public:
     ~Vulkan() override;
     void init(ANativeWindow*, const Scene&, int, bool);
     Metrics frame(const Frame&, std::vector<uint8_t>*) override;
+    void sampleMemory(const char*) override;
 
 private:
     ANativeWindow* window{};
@@ -110,6 +111,8 @@ private:
     std::array<Slot, kSlots> slots{};
     std::vector<Target> targets;
     Buffer geometry, quad, readback;
+    PFN_vkGetPhysicalDeviceMemoryProperties2KHR getMemory2{};
+    VkDeviceSize allocated{}, peakAllocated{};
 
     void createDevice();
     void createSwapchain();
@@ -131,7 +134,9 @@ private:
 
 Vulkan::~Vulkan() {
     if (device) {
-        if (vkDeviceWaitIdle(device) == VK_SUCCESS) {
+        const auto idle=vkDeviceWaitIdle(device);
+        BLOG("vk teardown waitIdle=%d", int(idle));
+        if (idle == VK_SUCCESS) {
             try {
                 for (uint32_t i = 0; i < kSlots; ++i) harvest(i);
                 pastPresents();
@@ -160,6 +165,8 @@ Vulkan::~Vulkan() {
         drop(readback);
         drop(quad);
         drop(geometry);
+        BLOG("vk teardown explicit_buffer_allocated=%llu peak=%llu",
+            static_cast<unsigned long long>(allocated),static_cast<unsigned long long>(peakAllocated));
         vkDestroyDevice(device, nullptr);
     }
     if (surface) vkDestroySurfaceKHR(instance, surface, nullptr);
@@ -242,7 +249,7 @@ void Vulkan::createDevice() {
     auto b = vkInfo<VkPhysicalDeviceMemoryBudgetPropertiesEXT>(
         VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT);
     if (budget) {
-        const auto getMemory2 = reinterpret_cast<PFN_vkGetPhysicalDeviceMemoryProperties2KHR>(
+        getMemory2 = reinterpret_cast<PFN_vkGetPhysicalDeviceMemoryProperties2KHR>(
             vkGetInstanceProcAddr(instance, "vkGetPhysicalDeviceMemoryProperties2KHR"));
         if (!getMemory2) throw std::runtime_error("vk: memory properties2 entry point missing");
         auto m = vkInfo<VkPhysicalDeviceMemoryProperties2>(VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PROPERTIES_2);
@@ -526,6 +533,7 @@ void Vulkan::alloc(Buffer& b, VkDeviceSize size, VkBufferUsageFlags usage,
     a.allocationSize = req.size;
     a.memoryTypeIndex = type;
     check(vkAllocateMemory(device, &a, nullptr, &b.memory), "vkAllocateMemory");
+    b.allocation=req.size;allocated+=req.size;peakAllocated=std::max(allocated,peakAllocated);
     check(vkBindBufferMemory(device, b.handle, b.memory, 0), "vkBindBufferMemory");
     b.capacity = size;
     b.coherent = (memory.memoryTypes[type].propertyFlags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) != 0;
@@ -539,8 +547,20 @@ void Vulkan::alloc(Buffer& b, VkDeviceSize size, VkBufferUsageFlags usage,
 void Vulkan::drop(Buffer& b) {
     if (b.mapping) vkUnmapMemory(device, b.memory);
     if (b.handle) vkDestroyBuffer(device, b.handle, nullptr);
-    if (b.memory) vkFreeMemory(device, b.memory, nullptr);
+    if (b.memory){vkFreeMemory(device, b.memory, nullptr);allocated-=b.allocation;}
     b = {};
+}
+
+void Vulkan::sampleMemory(const char* phase) {
+    BLOG("vk memory phase=%s explicit_buffer_allocated=%llu peak=%llu",phase,
+         static_cast<unsigned long long>(allocated),static_cast<unsigned long long>(peakAllocated));
+    if(!getMemory2||!physical)return;
+    auto b=vkInfo<VkPhysicalDeviceMemoryBudgetPropertiesEXT>(VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT);
+    auto m=vkInfo<VkPhysicalDeviceMemoryProperties2>(VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PROPERTIES_2);
+    m.pNext=&b;getMemory2(physical,&m);
+    for(uint32_t i=0;i<memory.memoryHeapCount;++i)
+        BLOG("vk memory phase=%s heap=%u budget=%llu usage=%llu",phase,i,
+             static_cast<unsigned long long>(b.heapBudget[i]),static_cast<unsigned long long>(b.heapUsage[i]));
 }
 
 void Vulkan::mappedSync(const Buffer& b, bool flush) {

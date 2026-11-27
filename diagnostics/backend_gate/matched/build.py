@@ -1,6 +1,7 @@
 """Build/verify an isolated benchmark APK on Windows. Never invokes ADB."""
 import csv
 import hashlib
+import json
 import os
 from pathlib import Path
 import re
@@ -23,6 +24,16 @@ out = Path(sys.argv[1]).resolve()
 if out.exists():
     raise FileExistsError(out)
 out.parent.mkdir(parents=True, exist_ok=True)
+inputs=[src/n for n in ("build.py","runner.cpp","bench.hpp","gl.cpp","vk.cpp","vk.vert","vk.frag","Bench.java","Lifecycle.java","AndroidManifest.xml")]
+inputs += [repo/"app/src/main/cpp/native_bridge.cpp",repo/"diagnostics/synthetic_input.csv"]
+def hashes():return {f.relative_to(repo).as_posix():hashlib.sha256(f.read_bytes()).hexdigest() for f in inputs}
+source_hashes=hashes()
+head=sp.check_output(["git","rev-parse","HEAD"],cwd=repo,text=True).strip()
+status=sp.check_output(["git","status","--porcelain","--untracked-files=no"],cwd=repo,text=True).strip()
+assert not status,"commit tracked changes before the provenance build"
+assert all(sp.run(["git","ls-files","--error-unmatch",f.relative_to(repo).as_posix()],cwd=repo,stdout=sp.DEVNULL).returncode==0 for f in inputs),"untracked build input"
+meta=out.with_suffix(".provenance.json")
+if meta.exists():raise FileExistsError(meta)
 with tempfile.TemporaryDirectory(dir=out.parent) as tmp:
     t = Path(tmp)
     def run(*args):
@@ -57,7 +68,7 @@ with tempfile.TemporaryDirectory(dir=out.parent) as tmp:
     symbols=sp.check_output([bin/"llvm-readelf.exe","--dyn-syms","--wide",t/"libmatched.so"],text=True)
     for method in ("start","step","close"):
         assert f"Java_com_infinipaint_diag_matched_Bench_{method}" in symbols
-    run(jdk/"javac.exe","--release","8","-cp",jar,"-d",t,src/"Bench.java")
+    run(jdk/"javac.exe","--release","8","-cp",jar,"-d",t,src/"Bench.java",src/"Lifecycle.java")
     run(bt/"d8.bat","--lib",jar,"--min-api","28","--output",t,*t.glob("com/**/*.class"))
     run(bt/"aapt2.exe","link","-I",jar,"--manifest",src/"AndroidManifest.xml","-o","base.apk")
     with zipfile.ZipFile(t/"base.apk","a") as z:
@@ -75,5 +86,14 @@ with tempfile.TemporaryDirectory(dir=out.parent) as tmp:
     with zipfile.ZipFile(t/"signed.apk") as z:
         assert z.testzip() is None and "classes.dex" in z.namelist()
         assert "lib/arm64-v8a/libmatched.so" in z.namelist()
+    signer=sp.check_output([bt/"apksigner.bat","verify","--print-certs",t/"signed.apk"],text=True)
+    tools={"ndk":(ndk/"source.properties").read_text(),"build_tools":(bt/"source.properties").read_text(),
+           "javac":sp.check_output([jdk/"javac.exe","-version"],stderr=sp.STDOUT,text=True),
+           "clang":sp.check_output([bin/"aarch64-linux-android28-clang++.cmd","--version"],text=True),
+           "android_jar_sha256":hashlib.sha256(jar.read_bytes()).hexdigest()}
+    assert hashes()==source_hashes,"source changed during build"
+    assert sp.check_output(["git","rev-parse","HEAD"],cwd=repo,text=True).strip()==head,"HEAD changed during build"
     (t/"signed.apk").rename(out)
+    meta.write_text(json.dumps({"git_head":head,"inputs":source_hashes,"tools":tools,"signer":signer,
+                               "apk_sha256":hashlib.sha256(out.read_bytes()).hexdigest()},indent=2))
 print(out,out.stat().st_size,"sha256="+hashlib.sha256(out.read_bytes()).hexdigest())
