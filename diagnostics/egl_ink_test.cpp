@@ -385,6 +385,8 @@ void comparePortableRamp() {
 
 #ifdef IP_M04_HOST
 #include "m04_host_probe.hpp"
+#elif defined(IP_M04_COVERAGE)
+#include "m04_coverage.hpp"
 #endif
 
 int main() {
@@ -393,7 +395,7 @@ int main() {
     const auto* renderer = reinterpret_cast<const char*>(glGetString(GL_RENDERER));
     check(version && renderer, "missing GL version or renderer");
     std::printf("GL_VERSION=%s GL_RENDERER=%s\n", version, renderer);
-#ifndef IP_M04_HOST
+#if !defined(IP_M04_HOST) && !defined(IP_M04_COVERAGE)
     check(std::strncmp(version, "OpenGL ES 2.0", 13) == 0,
           "expected GLES 2.0 (set MESA_GLES_VERSION_OVERRIDE=2.0)");
 #endif
@@ -409,6 +411,8 @@ int main() {
     Java_com_infinipaint_demo_NativeBridge_setSmoothingPreset(nullptr, nullptr, 0);
 #ifdef IP_M04_HOST
     return m04Probe();
+#elif defined(IP_M04_COVERAGE)
+    return coverageProbe();
 #endif
 
     const auto blank = render(raw);

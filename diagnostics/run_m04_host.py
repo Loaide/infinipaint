@@ -9,6 +9,11 @@ import re
 import shutil
 import subprocess as sp
 import tempfile
+import argparse
+
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument("--coverage", action="store_true", help="run only bounded M04 coverage comparison")
+coverage = parser.parse_args().coverage
 
 repo = Path(__file__).resolve().parents[1]
 cpp = repo / "app/src/main/cpp"
@@ -33,17 +38,28 @@ with tempfile.TemporaryDirectory() as directory:
         sp.run(["lib", "/nologo", "/machine:x64", "/def:" + name + ".def"], cwd=t, check=True)
     # Insert only into a disposable copy. Fail if a source anchor moved.
     src = (cpp / "native_bridge.cpp").read_text(encoding="utf-8")
-    for marker, hook in [
+    hooks = [
         ("framePanX = cameraPanX;", "probeLatch(cameraPanX,visibleRevision.load());"),
         ("// No input mutex is held during OpenGL calls.", "probeUnlocked();"),
         ("const double renderCpuMs =", "probeWork(frameDrawCalls,frameUploadBytes);"),
-    ]:
+    ]
+    declarations = "void probeLatch(double,long long); void probeUnlocked();void probeWork(long long,long long);"
+    if coverage:
+        declarations = "void captureQuad(float,float,float,float,float,float,float); void captureStroke();"
+        hooks = [("ink->derived={std::move(trace.rawMesh)", """
+            captureStroke();
+            for(size_t j=0;j<splineMesh.size();j+=6) {
+                const auto& q=splineMesh[j];
+                captureQuad(q.x,q.y,q.dirX,q.dirY,q.len,q.radius,q.endRadius);
+            }
+        """)]
+    for marker, hook in hooks:
         assert src.count(marker) == 1, marker
         src = src.replace(marker, hook + "\n    " + marker)
-    (t / "bridge.cpp").write_text("void probeLatch(double,long long); void probeUnlocked();"
-                                  "void probeWork(long long,long long);\n" + src, encoding="utf-8")
+    (t / "bridge.cpp").write_text(declarations + "\n" + src, encoding="utf-8")
     sp.run(["cl", "/nologo", "/std:c++20", "/O2", "/EHsc", "/utf-8", "/DNOMINMAX",
-            "/DIP_M04_HOST", "/DIP_REPLAY_TEST", "/I.", "/I" + str(cpp), "/I" + str(jdk),
+            "/DIP_M04_COVERAGE" if coverage else "/DIP_M04_HOST",
+            "/DIP_REPLAY_TEST", "/I.", "/I" + str(cpp), "/I" + str(jdk),
             "/I" + str(jdk / "win32"), diag / "egl_ink_test.cpp", "bridge.cpp",
             *cpp.glob("document/*.cpp"), *cpp.glob("input/*.cpp"), cpp / "stroke/spline.cpp",
             "libEGL.lib", "libGLESv2.lib", "/Fe:probe.exe"], cwd=t, check=True)
