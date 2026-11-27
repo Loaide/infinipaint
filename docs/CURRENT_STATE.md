@@ -2,12 +2,12 @@
 
 - M00, M00.5, M01 and M02: accepted.
 - M03: formally accepted with documented limitations.
-- M04.0: [proposal submitted for written approval](M04_PROPOSAL.md); implementation not started.
+- M04: [direction approved in principle with conditions](M04_PROPOSAL.md); first bounded [host checkpoint](../reports/M04_HOST_01.md) complete. No production implementation.
 - M05, M06 and M07: upcoming.
 
 See [M03 formal acceptance](../reports/M03_ACCEPTED.md).
 
-Next action is an owner decision on the proposed architecture and feasibility gates. No new architecture is approved here.
+Next action is an owner decision on the focused subpixel coverage comparison before paging.
 
 ---
 
