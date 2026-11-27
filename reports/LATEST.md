@@ -1,4 +1,6 @@
-# M03 accepted — latest milestone status
+# M04.3 authorized — backend selected
+
+Owner selected native Vulkan with compact instancing on SM-X626B. [Gate evidence, scope and unresolved fidelity](M04_BACKEND_GATE.md). Earlier status below is historical.
 
 M04 [backend recommendation](M04_BACKEND_GATE.md) pending owner approval: native Vulkan with compact instancing, based on the owner's completed matched campaign. [M04.2](M04_2_DATA_ACCESS.md) accepted as feasibility, not production scalability. [HOST_02 findings](M04_HOST_02.md) accepted, v1 retained. [Binding conditions](../docs/M04_PROPOSAL.md) stand. M03 is formally accepted with documented limitations.
 

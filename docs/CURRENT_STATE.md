@@ -7,7 +7,7 @@
 
 See [M03 formal acceptance](../reports/M03_ACCEPTED.md).
 
-M04.2 accepted for feasibility only. The [matched backend gate](../reports/M04_BACKEND_GATE.md) recommends native Vulkan with compact instancing; owner decision pending. Capacity, lifecycle recovery, sustained thermal behavior and peak memory are unproven. No production migration or M04.3.
+Backend selection closed by owner: native Vulkan + compact instances for SM-X626B. M04.3 authorized; retain GLES2/v1. Diagnostic capacity, sustained pacing and three same-backend recovery stages passed, not production certification. Landscape fidelity and physical peaks remain open.
 
 ---
 

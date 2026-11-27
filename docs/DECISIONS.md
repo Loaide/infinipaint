@@ -16,6 +16,6 @@ Pre-M01 update: repository identity is verified and M00.5 compilation repair acc
 
 [ADR-013: document edits and durable revisions](M03_PROPOSAL.md). Owner approved proposal `1b71523179ce6c66b619f07dae1ea80e5755955e` with binding additions recorded there. Android platform SQLite; implementation and device acceptance are separate gates.
 
-## Open decision — M04 graphics backend (not an approved ADR)
+## Approved M04 graphics backend — reference tablet
 
-M04.2 accepted for feasibility only. [Selection gate](../reports/M04_BACKEND_GATE.md): matched tablet evidence favors native Vulkan with compact instancing for CPU headroom and suffix size, not improved display latency. Recommendation pending; ADR-006 is not superseded by approval. Retain GLES2/v1 compatibility. Owner approval required before production GPU resource/scheduling design, backend migration or M04.3.
+The owner selects native Vulkan with compact instancing on SM-X626B, superseding ADR-006's provisional experiment there. M04.3 production execution work is authorized. Keep GLES2/v1 as the correctness reference, v1 storage and ADR-013 unchanged. Selection does not approve a fidelity waiver, a production cutover, other devices or a production index. See the [selection evidence and limits](../reports/M04_BACKEND_GATE.md).

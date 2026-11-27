@@ -6,7 +6,7 @@
 
 **Subsequent binding sequence:** HOST_02 findings accepted; no further AA experiments now. After the [M04.2 host checkpoint](../reports/M04_2_DATA_ACCESS.md), stop at explicit backend selection **before production GPU resource and scheduling architecture**. Evaluate the highest reliably supported GLES version against native Vulkan on matched reference-device workloads, retaining GLES2 as compatibility reference. This supersedes the later backend decision timing below. No migration without owner approval.
 
-**Current gate:** M04.2 accepted for feasibility only; packed pages remain the leading candidate subject to page growth, rank cost, reopen, construction and fixture limitations. The [completed matched comparison](../reports/M04_BACKEND_GATE.md) recommends native Vulkan with compact instancing for owner consideration; GLES2/v1 remains the compatibility reference. No migration or M04.3 approval.
+**Current gate:** Owner selected native Vulkan with compact instancing for the reference tablet and authorized M04.3. Integrate isolated publication and editing behind the existing application first; retain GLES2/v1 as the oracle. Landscape parity ≤2 is required before switching production pixels. M04.2 remains feasibility only, not approval to replace the index or storage.
 
 ## Baseline and scope
 
