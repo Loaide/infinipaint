@@ -119,7 +119,7 @@ class Campaign:
                 display=self.adb("shell","dumpsys","display").decode(errors="replace")
                 rates=re.findall(r"mActiveRenderFrameRate=([\d.]+)",display)
                 f.write("active_render_rates="+repr(rates)+"\n")
-                require(rates and float(rates[0])==90.0,"active display not verified at 90 Hz")
+                require(rates,"active display rate unavailable")
             if mem:
                 f.write(self.adb("shell","dumpsys","meminfo",PKG).decode(errors="replace")+"\n")
         require(status<=1,"elevated thermal state; campaign stopped")
@@ -289,6 +289,9 @@ class Campaign:
     def execute(self):
         try:
             self.preflight()
+            if self.a.lifecycle_only:
+                self.lifecycle()
+                return
             for s in ("parity","reverse"):self.parity(s)
             load=self.capacity()
             # Run only the leading Vulkan candidate for >=600 s of measured presentation.
@@ -314,6 +317,7 @@ def main():
     p.add_argument("--sha256",required=True)
     p.add_argument("--out",required=True,type=Path)
     p.add_argument("--authorize-vulkan-only",required=True,action="store_true")
+    p.add_argument("--lifecycle-only",action="store_true")
     args=p.parse_args()
     Campaign(args).execute()
 

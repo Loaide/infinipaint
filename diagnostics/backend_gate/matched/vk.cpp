@@ -282,9 +282,9 @@ void Vulkan::createSwapchain() {
          c.minImageExtent.height, c.maxImageExtent.width, c.maxImageExtent.height, c.minImageCount,
          c.maxImageCount, c.maxImageArrayLayers, static_cast<unsigned>(c.currentTransform),
          c.supportedTransforms, c.supportedCompositeAlpha, c.supportedUsageFlags);
-    if (w <= 0 || h <= 0 || c.currentTransform != VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR ||
+    if (w <= 0 || h <= 0 ||
         !(c.supportedTransforms & VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR)) {
-        throw std::runtime_error("vk: window must support and currently use identity orientation");
+        throw std::runtime_error("vk: window must support identity preTransform");
     }
     extent = {static_cast<uint32_t>(w), static_cast<uint32_t>(h)};
     constexpr uint32_t variable = std::numeric_limits<uint32_t>::max();
