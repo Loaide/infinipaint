@@ -1,3 +1,7 @@
+# Current handoff — M04 canonical span streaming, first slice
+
+Inspected `4b0710b3e9f099d86aa1ce6973f4964f7a3a3dc7` on owner branch `feature/m04-scalable-renderer`. [Scope, evidence and acceptance](../reports/M04_CANONICAL_STREAM.md). Rolling v1 production replay and durable single-record ordinal-range reader implemented; Host tests, Android instrumentation and tablet acceptance passed. Then integrate persistent span bounds/checkpoints and actual viewport demand with revision-compatible roots. No new GPU backend work.
+
 # Current handoff — M04 counted B+ paint ordering
 
 Inspected `bdcc417f5b0d66716986d89833446ea4b9d82a4f`, branch `feature/m04-scalable-renderer`. [Scope, tests and acceptance](../reports/M04_COUNTED_ORDER.md). Counted sequence and ID locator integrated in existing planner, with bounded validated splices and exact rendering. Final host tests, Android build and tablet acceptance passed. Next: canonical curve-span streaming. Preserve known resident mesh limit and later canonical streaming/residency obligations. No Vulkan cutover or backend rerun.

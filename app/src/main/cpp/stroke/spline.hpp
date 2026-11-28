@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <algorithm>
 #include <span>
+#include <array>
 namespace engine::stroke {
 // Transform from Phase 1 view-local pixels into document-local world units.
 // Caller freezes this mapping for a stroke; camera changes require explicit handling upstream.
@@ -26,6 +27,7 @@ public:
 private:
     friend class SplineFitter;
     friend class IncrementalSplineBuilder;
+    friend class StreamingSpline;
     struct Segment {
         core::Vec2 a{},b{},c{},d{}; // P(u) = a + u(b + u(c + u*d)), local to origin
         std::size_t left=0, right=0;
@@ -52,6 +54,7 @@ public:
 private:
     explicit SplineFitter(Params p) : params_(p) {}
     friend class IncrementalSplineBuilder;
+    friend class StreamingSpline;
     core::Result<double> coefficients(std::span<const core::Vec2> unique,std::span<double> h,
                                      std::span<FittedSpline::Segment> segments) const;
     Params params_;
@@ -111,4 +114,36 @@ private:
     std::vector<float> peak_pressure_; // ink deposited during a stationary dwell
     FittedSpline cached_;
 };
+// A finalized v1 interval. No synthetic caps at its endpoints. The consumer
+// must union all intervals of one stroke before resolving its paint color.
+struct CurveSpan {
+    size_t ordinal=0;
+    core::Vec2 origin{},a{},b{},c{},d{};
+    float departure=0,arrival=0,peak=0;
+    [[nodiscard]] core::Vec2 at(double u) const noexcept;
+    [[nodiscard]] double linear_error_bound() const noexcept;
+    [[nodiscard]] int tessellation_steps(double tolerance) const noexcept;
+};
+// Same four-knot fitting window and stable origin as IncrementalSplineBuilder,
+// but no retained sample history or per-segment vector. Sink owns provisional
+// results until the entire record (including checksum) has been validated.
+class StreamingSpline {
+public:
+    using Emit = bool(*)(void*,const CurveSpan&);
+    explicit StreamingSpline(SplineFitter fitter):fitter_(std::move(fitter)) {}
+    [[nodiscard]] core::Result<void> append(const SplinePoint&,void*,Emit);
+    [[nodiscard]] core::Result<void> finish(void*,Emit);
+    size_t samples() const noexcept {return samples_;}
+    size_t emitted() const noexcept {return emitted_;}
+private:
+    struct Knot {core::Vec2 p{};float arrival=0,departure=0,peak=0;};
+    SplineFitter fitter_;
+    std::array<Knot,3> knots_{};
+    core::Vec2 origin_{};
+    CurveSpan tail_{};
+    size_t used_=0,samples_=0,emitted_=0;
+    double lastTime_=-1;
+    bool done_=false,failed_=false;
+};
+
 }

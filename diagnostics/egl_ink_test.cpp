@@ -402,6 +402,43 @@ void comparePortableRamp() {
 }
 
 #ifdef IP_REPLAY_TEST
+void canonicalSpanPixelOracle(Pbuffer& pbuffer) {
+    using namespace engine::document;
+    using namespace engine::tablet;
+    // The preceding fixture intentionally staged a 1 MiB mesh budget.
+    // Give this long-stroke test its own document with normal host headroom.
+    Java_com_infinipaint_demo_NativeBridge_suspend(nullptr,nullptr,true);
+    while(auto token=nextSave())check(acknowledge(token),"canonical fixture save ack");
+    auto doc=std::make_unique<Document>(Uuid{88});
+    check(doc->finishRestore(0,0)==Status::Ok&&doc->grant(1,100),"canonical fixture identity");
+    check(stage(std::move(doc),96u<<20),"canonical fixture stage");activate(0,0,1);discard();
+    Java_com_infinipaint_demo_NativeBridge_suspend(nullptr,nullptr,false);
+    auto camera=[](double x,double y,double z){Java_com_infinipaint_demo_NativeBridge_setCamera(nullptr,nullptr,x,y,z);};
+    camera(0,0,1);
+    begin(99);
+    double t=1;
+    // Cross two persisted raw-chunk boundaries. Dwell, tied timestamps,
+    // changing pressure, and integer-coordinate revisits are intentional.
+    for(int i=0;i<4097;++i) {
+        if(i%13!=0&&i%7!=0)t+=.003;
+        const int x=-256+i/8;
+        const int y=18+((i/23)%2?23-(i/11)%23:(i/11)%23);
+        sample(99,x,y,t,float((i*17)%101)/100.f);
+    }
+    end(99);
+    begin(100);sample(100,-300,32,2,.5f);sample(100,300,32,2,.9f);end(100);
+    const std::array<std::array<double,3>,12> views{{
+        {-256,0,1},{-128,0,1},{-64,0,1},{0,0,1},{128,0,1},{240,0,1},
+        {-128,12,4},{-32,18,8},{16,18,16},{96,10,4},{-250,-20,.5},{0,0,1}}};
+    std::vector<Frame> before;before.reserve(views.size()*4);
+    for(auto v:views){camera(v[0],v[1],v[2]);for(int m=0;m<4;++m)before.push_back(render(m));}
+    check(ipTestCodecReplay(),"multi-chunk v1 reconstruction differs at vertex bytes");
+    pbuffer.recreate();size_t i=0;
+    for(auto v:views){camera(v[0],v[1],v[2]);for(int m=0;m<4;++m)check(before[i++]==render(m),"multi-chunk reconstruction pixels differ");}
+    camera(0,0,1);clear();
+    while(auto token=nextSave())check(acknowledge(token),"canonical fixture final save ack");
+    std::printf("PASS: 4097-sample canonical chunk boundary, exact vertex bytes, %zu four-mode RGBA comparisons after context recreation\n",i);
+}
 void spatialPixelOracle(Pbuffer& pbuffer,const Pixel& background) {
     using namespace engine::document;
     using namespace engine::tablet;
@@ -646,6 +683,7 @@ int main() {
     }
     Java_com_infinipaint_demo_NativeBridge_suspend(nullptr,nullptr,false);
     std::puts("PASS: v1 codec and reconstruction vertex bytes + 4-mode RGBA parity");
+    canonicalSpanPixelOracle(pbuffer);
     spatialPixelOracle(pbuffer,background);
 #endif
     clear();

@@ -1,3 +1,7 @@
+## M04 canonical span streaming — first slice
+
+`stroke/spline.*`: rolling exact v1 spline. `document/canonical_stream.hpp`: fixed-state replay; `document/canonical_range.hpp`: bounded CPS1 interval packets and conservative v1 bounds. `native_bridge.cpp::reconstructV1`: production mesh reconstruction. `storage/DocumentDatabase.java`: shared record validation and targeted durable read; `storage/StorePort.java` / `tablet/store_jni.cpp`: bounded native lease. `MainActivity.dump`: canonical telemetry. `diagnostics/run_m04_canonical_stream.sh stress` and `storage/CanonicalRangeTest.java`: host and Android verification. [Report](../reports/M04_CANONICAL_STREAM.md). Range reader not yet connected to viewport planner.
+
 ## M04 production spatial access (first slice)
 
 `tablet/spatial_pages.hpp`: checked ephemeral packed pages, bounded page/rank caches, edit BVH, sparse ordered query and charges. `tablet/counted_order.hpp`: counted sequence, ID locator, split/borrow/merge/reclaim, prefix rank. `tablet/spatial_delta.hpp`: validates bounded arbitrary membership splices before mutations; rebuild on unsupported survivor reorder, overlay capacity or incompatible base. `native_bridge.cpp` FramePlanner: paired roots per resident scene, compatible candidate envelope and exact fallback, telemetry. `MainActivity.dump`: spatial counters/histogram. `diagnostics/run_m04_spatial.sh stress` and `egl_ink_test.cpp`: ordered oracle, faults and seam/pixel tests. [Scope and constraints](../reports/M04_SPATIAL_ACCESS.md).

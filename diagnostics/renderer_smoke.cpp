@@ -162,11 +162,39 @@ void glBlendFunc(GLenum,GLenum) {}
 static void check(bool ok,const char* msg){if(!ok){std::fprintf(stderr,"FAIL: %s\n",msg);std::exit(1);}}
 #include <chrono>
 #include <algorithm>
+namespace engine::tablet {std::array<bool,3> hostCanonicalReplayProbe(const std::shared_ptr<const document::Ink>&,size_t,size_t,double);}
 int main(int argc,char** argv){
     auto render=[](int mode){Java_com_infinipaint_demo_NativeBridge_render(nullptr,nullptr,mode);};
     auto sample=[](int n,double timestamp){return Java_com_infinipaint_demo_NativeBridge_sample(nullptr,nullptr,1,
         100+3*n,250+25*std::sin(n*0.13),timestamp,0.6f,0,0)==JNI_TRUE;};
     auto resize=[](int w,int h){Java_com_infinipaint_demo_NativeBridge_resizeViewport(nullptr,nullptr,w,h);};
+    if(argc>1 && std::string_view(argv[1])=="canonical") {
+        using namespace engine::document;
+        using namespace engine::tablet;
+        engine::input::RawInputStroke raw;
+        for(size_t i=0;i<500;++i)raw.push_back({{double(i)*.7,40*std::sin(double(i)*.13)},1.+i*.01,float(i%11)/10.f,0,0});
+        auto ink=std::make_shared<const Ink>(std::move(raw),Brush{});
+        int faults=0;
+        for(int i=0;i<128;++i) {
+            failAfter=i;const auto r=hostCanonicalReplayProbe(ink,32u<<20,1u<<20,0);failAfter=-1;
+            check(r[1]&&r[2],"failed replay leaves output and owner charges intact");
+            if(r[0])break;
+            ++faults;
+        }
+        check(faults>10&&faults<128,"all mesh allocation sites exercised");
+        for(size_t allowance:{size_t(0),size_t(216),size_t(1024),size_t(16384)}) {
+            const auto r=hostCanonicalReplayProbe(ink,allowance,1u<<20,0);
+            check(!r[0]&&r[1]&&r[2],"bounded mesh budget rejection");
+        }
+        const auto scratch=hostCanonicalReplayProbe(ink,32u<<20,16383,0);
+        check(!scratch[0]&&scratch[1]&&scratch[2],"scratch budget rejection");
+        const auto translation=hostCanonicalReplayProbe(ink,32u<<20,1u<<20,1e100);
+        check(!translation[0]&&translation[1]&&translation[2],"invalid translated geometry cannot publish");
+        const auto success=hostCanonicalReplayProbe(ink,32u<<20,1u<<20,-500);
+        check(success[0]&&success[1]&&success[2],"successful replay after failures");
+        std::printf("PASS production canonical replay: %d allocation failures, four mesh budget failures, scratch and translation rejection, charge lifetime and exact retry\n",faults);
+        return 0;
+    }
     if(argc>1 && std::string_view(argv[1])=="planner") {
         using namespace engine::tablet;
         using namespace std::chrono_literals;

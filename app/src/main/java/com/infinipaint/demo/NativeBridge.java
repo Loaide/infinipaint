@@ -30,6 +30,7 @@ public final class NativeBridge {
  static native long[] spatialCounters();
  static native long[] spatialLatency();
  static native long[] paintOrderCounters();
+ static native long[] canonicalReplayCounters();
 
 
 }

@@ -310,4 +310,64 @@ core::Result<FittedSpline> IncrementalSplineBuilder::tail_preview() const{
     }catch(const std::bad_alloc&){return Error{ErrorCode::AllocationFailure,"Preview allocation failed"};}
      catch(const std::length_error&){return Error{ErrorCode::ResourceLimit,"Preview allocation limit"};}
 }
+Vec2 CurveSpan::at(double u) const noexcept {return add(origin,cubic(a,b,c,d,u));}
+double CurveSpan::linear_error_bound() const noexcept {
+    return std::max(std::hypot(2*c.x,2*c.y),std::hypot(2*c.x+6*d.x,2*c.y+6*d.y))/8;
+}
+int CurveSpan::tessellation_steps(double tolerance) const noexcept {
+    return int(std::clamp(std::ceil(std::sqrt(linear_error_bound()/tolerance)),
+                          1.,double(IncrementalSplineBuilder::max_steps)));
+}
+core::Result<void> StreamingSpline::append(const SplinePoint& p,void* ctx,Emit emit) {
+    // On ANY failure, the stream is poisoned. No partial stroke is published.
+    auto reject=[&](core::Error error)->core::Result<void>{failed_=true;return error;};
+    if(done_||failed_||!emit) return reject(Error{ErrorCode::InvalidState,"Closed curve stream"});
+    if(!finite_point(p)||p.timestamp<lastTime_) return reject(Error{ErrorCode::InvalidArgument,"Invalid curve sample"});
+    if(samples_>=fitter_.max_samples()) return reject(Error{ErrorCode::ResourceLimit,"Curve sample limit"});
+    if(used_ && !finite(sub(p.position,origin_))) return reject(Error{ErrorCode::NumericalError,"Curve origin overflow"});
+    if(!used_) {
+        origin_=p.position;knots_[0]={p.position,p.pressure,p.pressure,p.pressure};used_=1;
+    } else if(p.position.x==knots_[used_-1].p.x && p.position.y==knots_[used_-1].p.y) {
+        auto& k=knots_[used_-1];k.departure=p.pressure;k.peak=std::max(k.peak,p.pressure);
+    } else {
+        std::array<Vec2,4> window{};
+        std::array<double,3> intervals{};
+        std::array<FittedSpline::Segment,3> next{};
+        const auto base=knots_[0].p;
+        for(size_t i=0;i<used_;++i) window[i]=sub(knots_[i].p,base);
+        window[used_]=sub(p.position,base);
+        auto fit=fitter_.coefficients(std::span(window).first(used_+1),intervals,next);
+        if(!fit) return reject(fit.error());
+        const auto shift=sub(base,origin_);
+        auto make=[&](size_t i,size_t ordinal,float arrival) {
+            const auto& c=next[i]; const auto& k=knots_[i];
+            return CurveSpan{ordinal,origin_,add(c.a,shift),c.b,c.c,c.d,k.departure,arrival,k.peak};
+        };
+        auto last=make(used_-1,emitted_+(used_>1),p.pressure);
+        if(!finite(last.a)) return reject(Error{ErrorCode::NumericalError,"Curve coefficient overflow"});
+        if(used_>1) {
+            auto stable=make(used_-2,emitted_,knots_[used_-1].arrival);
+            if(!finite(stable.a)) return reject(Error{ErrorCode::NumericalError,"Curve coefficient overflow"});
+            // Mark poisoned before external code; exceptions cannot leave a resumable prefix.
+            failed_=true;
+            if(!emit(ctx,stable)) return Error{ErrorCode::ResourceLimit,"Curve sink rejected span"};
+            failed_=false;++emitted_;
+        }
+        tail_=last;
+        if(used_==3) {knots_[0]=knots_[1];knots_[1]=knots_[2];--used_;}
+        knots_[used_++]={p.position,p.pressure,p.pressure,p.pressure};
+    }
+    ++samples_;lastTime_=p.timestamp;return {};
+}
+core::Result<void> StreamingSpline::finish(void* ctx,Emit emit) {
+    if(done_||failed_||!used_||!emit) {failed_=true;return Error{ErrorCode::InvalidState,"Cannot seal curve stream"};}
+    done_=true;
+    if(used_>1) {
+        failed_=true;
+        if(!emit(ctx,tail_)) return Error{ErrorCode::ResourceLimit,"Curve sink rejected tail"};
+        failed_=false;++emitted_;
+    }
+    return {};
+}
+
 }

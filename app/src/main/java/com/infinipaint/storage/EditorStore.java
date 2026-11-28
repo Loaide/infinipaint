@@ -25,6 +25,17 @@ public final class EditorStore {
     // Main thread
     private Listener listener;
     private boolean busy, opening;
+    private static final String OPEN_TAG="IP_DOC_OPEN";
+    // Keep the last command outcome separate from autosave messages. Main-thread
+    // status changes and worker phase updates must not erase a failed open.
+    private volatile String openDiagnostic="not requested";
+    private String openFailure;
+    private long openSerial;
+    public String openDiagnostic() {return openDiagnostic;}
+    private void traceOpen(long serial,String phase) {
+        openDiagnostic=serial+" "+phase;
+        android.util.Log.i(OPEN_TAG,openDiagnostic);
+    }
     private String message="Opening catalog";
     private double x,y,zoom=1;
     private long sequence;
@@ -72,7 +83,8 @@ public final class EditorStore {
     public String status() {
         long visible=NativeBridge.revision(),stored=durable;
         String label=message.equals("Saved") && visible!=stored?"Saving":message;
-        return label+(active==null?"":" | "+active.toString().substring(0,8)+" "+stored+"/"+visible);
+        return label+(active==null?"":" | "+active.toString().substring(0,8)+" "+stored+"/"+visible)
+                +(openFailure==null?"":" | Last open failed: "+openFailure);
     }
     private void show(String msg) {message=msg;if(listener!=null) listener.changed();}
     /** Nonblocking user barrier. One newest target subsumes older same-session
@@ -84,13 +96,23 @@ public final class EditorStore {
         save();
     }
     public void open(boolean create,boolean next) {
-        if(busy) return;
+        final String action=create?"create":next?"next":"selected";
+        if(busy) {
+            android.util.Log.w(OPEN_TAG,"Rejected "+action+": busy; opening="+opening);
+            if(!opening) {openDiagnostic="Rejected "+action+": busy";show("Document operation busy; retry");}
+            return;
+        }
+        final long serial=++openSerial;
+        openFailure=null;
+        traceOpen(serial,"accepted "+action+" active="+active);
         busy=true;opening=true;
         NativeBridge.suspend(true);
         flushView();
         show("Opening");
         io.post(()->{
+            String phase="catalog";
             try {
+                traceOpen(serial,phase);
                 if(db==null) {
                     boolean known=catalogState.getBoolean("initialized",false);
                     db=DocumentDatabase.open(path,!known && !path.exists());
@@ -98,29 +120,44 @@ public final class EditorStore {
                         db.close();db=null;throw new IllegalStateException("Cannot retain catalog initialization marker");
                     }
                 }
+                phase="flush previous document";traceOpen(serial,phase);
                 writeLatestView(); drain();
+                phase="resolve "+action;traceOpen(serial,phase);
                 UUID id=create?db.createDocument():next?db.next(current):db.selected();
                 if(id==null) id=db.next(null);
                 if(id==null) id=db.createDocument();
                 final UUID target=id;
+                phase="view target="+target;traceOpen(serial,phase);
                 DocumentDatabase.View view=db.view(target);
-                if(!target.equals(current)) {
+                final boolean same=target.equals(current);
+                if(!same) {
+                    phase="activate target="+target;traceOpen(serial,phase);
                     durable=activate(db,target,resident,view);current=target;
                 }
+                traceOpen(serial,"worker completed target="+target+" same="+same);
                 main.post(()->{
                     active=target; x=view.x;y=view.y;zoom=view.zoom;sequence=view.seq;viewDurable=view.seq;
                     barrierDoc=null;busy=false;opening=false;
                     if(listener!=null) listener.restore(x,y,zoom);
-                    NativeBridge.suspend(false);show("Saved");
+                    NativeBridge.suspend(false);
+                    traceOpen(serial,(same?"same document ":"activated ")+target);
+                    show(next && same?"Only one document":"Saved");
                 });
             } catch(RuntimeException e) {
-                main.post(()->{busy=false;opening=false;NativeBridge.suspend(false);show("Open failed: "+e.getMessage());});
+                final String failure=phase+": "+e.getClass().getSimpleName()+": "+e.getMessage();
+                android.util.Log.e(OPEN_TAG,"Open "+serial+" failed at "+phase,e);
+                main.post(()->{
+                    busy=false;opening=false;NativeBridge.suspend(false);
+                    openFailure=failure;traceOpen(serial,"failed "+failure);show("Open failed");
+                });
             }
         });
     }
     static long activate(DocumentDatabase db,UUID target,long resident,DocumentDatabase.View view) {
         final long[] rev={0};
+        String phase="load";
         try {
+            android.util.Log.i(OPEN_TAG,"Activation "+target+" load");
             db.load(target,resident/512,resident/8,new DocumentDatabase.Restore() {
                 public void begin(UUID doc,long r,long ceiling,long count) {
                     rev[0]=r;StorePort.begin(doc.getMostSignificantBits(),doc.getLeastSignificantBits(),r,ceiling,count,resident);
@@ -131,10 +168,17 @@ public final class EditorStore {
                 public void chunk(byte[] b) {StorePort.chunk(b);}
                 public void endStroke() {StorePort.endStroke();}
             });
+            phase="reserve";android.util.Log.i(OPEN_TAG,"Activation "+target+" reserve");
             long first=db.reserve(target,65536);
-            StorePort.stage(first,first+65535,resident/3);db.select(target);
+            phase="stage";android.util.Log.i(OPEN_TAG,"Activation "+target+" stage");
+            StorePort.stage(first,first+65535,resident/3);
+            phase="select";android.util.Log.i(OPEN_TAG,"Activation "+target+" select");
+            db.select(target);
+            phase="publish";android.util.Log.i(OPEN_TAG,"Activation "+target+" publish");
             StorePort.activate(view.x,view.y,view.zoom);
             return rev[0];
+        } catch(RuntimeException e) {
+            android.util.Log.e(OPEN_TAG,"Activation "+target+" failed at "+phase,e);throw e;
         } finally {StorePort.discard();}
     }
     private void drain() {

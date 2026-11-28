@@ -1,3 +1,7 @@
+# M04 — Canonical span streaming (first slice, functionally verified)
+
+Counted ordering checkpoint `4b0710b` is owner-accepted. [Canonical replay and targeted range reader](../reports/M04_CANONICAL_STREAM.md) functionally verified; Android and tablet acceptance passed. Production reconstruction is rolling and bounded; full viewport streaming, paired span roots, compaction, LOD and residency remain open. No budget or backend change.
+
 ## Current M04 increment — counted paint ordering (functionally verified)
 
 Baseline `bdcc417f5b0d66716986d89833446ea4b9d82a4f`. [Production counted B+ sequence and locator](../reports/M04_COUNTED_ORDER.md) replace absolute rank pages. Valid bounded middle splices no longer force a rebuild; paired spatial overlay compaction, canonical streaming, residency and full engine gates remain open. Final host suites passed; Android build and 10/10 tablet checks passed.

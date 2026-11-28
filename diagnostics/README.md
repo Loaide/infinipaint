@@ -1,3 +1,7 @@
+## M04 canonical span streaming
+
+On Linux with C++20 and JDK (set `JAVA_HOME` if needed): `sh diagnostics/run_m04_canonical_stream.sh stress` runs strict seeded oracle, allocation-disabled scale/faults and actual host JNI tests. `run_renderer_smoke.sh` exercises production reconstruction admission failure; `egl_ink_test.cpp` includes multi-chunk replay pixel/vertex parity. Android: `:app:connectedM03VerifyAndroidTest -Pandroid.testInstrumentationRunnerArguments.class=com.infinipaint.storage.CanonicalRangeTest` tests actual SQLite/JNI. Host tests do not substitute for Android instrumentation. [Evidence and scope](../reports/M04_CANONICAL_STREAM.md).
+
 # Diagnostics and validation
 
 ## Device input audit

@@ -1,5 +1,9 @@
 #include "tablet/session.hpp"
 #include "document/codec.hpp"
+#include "document/canonical_range.hpp"
+#include <mutex>
+#include <limits>
+#include <chrono>
 #include <jni.h>
 #include <stdexcept>
 
@@ -21,6 +25,15 @@ struct Incoming {
     size_t used;
 };
 std::unique_ptr<Incoming> incoming;
+// One globally admitted bounded range transfer. The catalog worker owns its
+// token, but a stale token never dereferences or frees another transfer.
+std::mutex rangeMutex;
+std::unique_ptr<CanonicalRange> rangeReader;
+jlong rangeToken=0;
+// Only the range lease is serialized, not GL, edits or frame publication.
+std::atomic<uint64_t> rangeAdmissions{0},rangeReleases{0},rangeSlices{0},rangeInputBytes{0},
+    rangeReturned{0},rangeOutputBytes{0},rangeSliceNs{0},rangeSliceMax{0},rangeActive{0};
+constexpr size_t rangeSliceSamples=64;
 void require(bool ok) {if(!ok) throw std::invalid_argument("Invalid or stale document transfer");}
 template<class F> auto guarded(JNIEnv* env,F f) -> decltype(f()) {
     try{return f();}
@@ -46,6 +59,55 @@ Uuid uuid(jlong hi,jlong lo) {
 }
 #define STORE(name) Java_com_infinipaint_storage_StorePort_##name
 extern "C" {
+JNIEXPORT jlong JNICALL STORE(rangeBegin)(JNIEnv* e,jclass,jbyteArray header,jint samples,jint first,jint count) {
+    return guarded(e,[&]() -> jlong {
+        std::lock_guard lock(rangeMutex);
+        require(!rangeReader && rangeToken<std::numeric_limits<jlong>::max() && header &&
+                e->GetArrayLength(header)==wire::headerBytes && samples>0 && first>=0 && count>0);
+        wire::Header h;
+        e->GetByteArrayRegion(header,0,h.size(),reinterpret_cast<jbyte*>(h.data()));require(!e->ExceptionCheck());
+        auto r=CanonicalRange::create(h,size_t(samples),size_t(first),size_t(count));require(bool(r));
+        rangeReader=std::move(r).value();++rangeAdmissions;rangeActive.store(1);return ++rangeToken;
+    });
+}
+JNIEXPORT void JNICALL STORE(rangeChunk)(JNIEnv* e,jclass,jlong token,jbyteArray array,jint offset,jint length) {
+    guarded(e,[&]{
+        std::lock_guard lock(rangeMutex);
+        require(rangeReader && token==rangeToken && array);
+        const auto n=e->GetArrayLength(array);
+        require(offset>=0 && length>0 && offset<=n && length<=n-offset &&
+                offset%wire::sampleBytes==0 && length%wire::sampleBytes==0 &&
+                size_t(length)<=rangeSliceSamples*wire::sampleBytes);
+        std::array<uint8_t,rangeSliceSamples*wire::sampleBytes> chunk;
+        e->GetByteArrayRegion(array,offset,length,reinterpret_cast<jbyte*>(chunk.data()));
+        require(!e->ExceptionCheck());
+        const auto start=std::chrono::steady_clock::now();
+        const bool ok=rangeReader->append(std::span(chunk).first(size_t(length)));
+        const auto ns=uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now()-start).count());
+        ++rangeSlices;rangeInputBytes+=length;rangeSliceNs+=ns;
+        auto old=rangeSliceMax.load();while(old<ns&&!rangeSliceMax.compare_exchange_weak(old,ns)) {}
+        require(ok);return true;
+    });
+}
+JNIEXPORT jbyteArray JNICALL STORE(rangeFinish)(JNIEnv* e,jclass,jlong token) {
+    return guarded(e,[&]() -> jbyteArray {
+        std::lock_guard lock(rangeMutex);
+        require(rangeReader && token==rangeToken && rangeReader->finish());
+        auto out=bytes(e,rangeReader->result());
+        if(out&&!e->ExceptionCheck()){++rangeReturned;rangeOutputBytes+=rangeReader->result().size();}
+        return out;
+    });
+}
+JNIEXPORT void JNICALL STORE(rangeDiscard)(JNIEnv*,jclass,jlong token) {
+    std::lock_guard lock(rangeMutex);
+    if(rangeReader && token==rangeToken) {rangeReader.reset();++rangeReleases;rangeActive.store(0);}
+}
+JNIEXPORT jlongArray JNICALL STORE(rangeCounters)(JNIEnv* e,jclass) {
+    return longs(e,std::array<jlong,12>{jlong(rangeAdmissions.load()),jlong(rangeReleases.load()),
+        jlong(rangeSlices.load()),jlong(rangeInputBytes.load()),jlong(rangeReturned.load()),
+        jlong(rangeOutputBytes.load()),jlong(rangeSliceNs.load()),jlong(rangeSliceMax.load()),
+        jlong(rangeActive.load()),jlong(sizeof(CanonicalRange)),jlong(CanonicalRange::maxScratch),jlong(rangeSliceSamples)});
+}
 JNIEXPORT void JNICALL STORE(begin)(JNIEnv* e,jclass,jlong hi,jlong lo,jlong rev,jlong high,jlong count,jlong slice) {
     guarded(e,[&]{require(rev>=0 && high>=0 && count>=0 && uint64_t(count)<=SIZE_MAX);
         require(slice>0 && slice<=(jlong(384)<<20));tablet::setPhysicalSlice(size_t(slice));

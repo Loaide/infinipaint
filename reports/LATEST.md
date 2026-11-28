@@ -1,3 +1,9 @@
+# M04 canonical span streaming — first slice, functionally verified
+
+[Implementation and acceptance](M04_CANONICAL_STREAM.md) · [Host results](M04_CANONICAL_STREAM_HOST_RESULTS.txt). Rolling v1 replay in production reconstruction and targeted revision-checked durable range reader. Android build, instrumentation and tablet acceptance passed. Direct viewport streaming, persistent span checkpoints and geometry residency remain open.
+
+---
+
 # M04 counted B+ paint ordering — functionally verified
 
 [Implementation, measured evidence and Android acceptance](M04_COUNTED_ORDER.md) · [Host output](M04_COUNTED_ORDER_HOST_RESULTS.txt). Counted order and locator replace fixed rank tree in production planner. Spatial overlay compaction and canonical/mesh streaming remain open.

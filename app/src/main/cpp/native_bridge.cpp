@@ -25,6 +25,7 @@
 #include "document/document.hpp"
 #include "document/change_queue.hpp"
 #include "document/codec.hpp"
+#include "document/canonical_stream.hpp"
 #include "document/eraser.hpp"
 #include "document/working_set.hpp"
 #include "tablet/session.hpp"
@@ -74,6 +75,10 @@ namespace {
     std::atomic<uint64_t> physicalSlice{0},sceneOwners{0},candidateNodes{0},liveVboCharge{0};
     std::atomic<uint64_t> livePublicationBytes{0},livePublicationHigh{0},publicationRetries{0},plannerFixedCharge{0};
     tablet::spatial::Stats spatialStats;
+    // Restore/edit worker reconstruction only, not active ink callbacks.
+    struct ReplayCounters {
+        std::atomic<uint64_t> attempts{0},success{0},failed{0},samples{0},spans{0},chords{0},ns{0},maxNs{0},peakMesh{0};
+    } replayCounters;
     bool admits(uint64_t activeMesh,uint64_t samples,uint64_t decoding=0,uint64_t extraNodes=0) {
         const auto slice=physicalSlice.load(std::memory_order_relaxed);
         if(!slice) return true; // host renderer fixtures have no Android process
@@ -1677,35 +1682,98 @@ static FinishedTrace finishV1(Trace& trace,std::shared_ptr<const document::Ink> 
                      {ink,&ink->derived[2]},b.minX,b.minY,b.maxX,b.maxY,trace.gpuId};
 }
 
+// Reconstruct from finalized bounded spans; never allocate raw/clean sample
+// histories or a full curve coefficient vector on this replay path. Outputs
+// remain whole-stroke resident v1 meshes until the residency milestone.
 static bool reconstructV1(const std::shared_ptr<const document::Ink>& record,FinishedTrace& out,double dx,double dy,
                           size_t allowance,size_t scratchLimit) {
-    if(!record || record->brush.recipe!=1 || record->samples.empty()) return false;
-    auto p=input::InputProcessor::create(record->brush.filter);
-    auto f=stroke::SplineFitter::create({stroke::Parameterization::Centripetal,1000000,.01,14});
-    if(!p || !f) return false;
-    Trace scratch(std::move(p).value(),std::move(f).value());
-    scratch.strokeRadiusWorld=record->brush.radiusWorld;
-    scratch.meshAllowance=allowance;
-    scratch.scratchAllowance=scratchLimit;
-    if(!scratch.input.begin_stroke()) return false;
-    for(const auto& s:record->samples)
-        if(!appendV1(scratch,s,1,0,false)) return false;
-    peak(switchHigh,workingBytes(scratch)+document::Ink::liveBytes.load()+retainedMeshes.load()+gpuRequested.load());
-    out=finishV1(scratch,record);
-    if(dx!=0 || dy!=0) {
+    struct Observation {
+        int64_t start=profileNs();bool ok=false;
+        size_t samples=0,spans=0,chords=0,bytes=0;
+        Observation(){++replayCounters.attempts;}
+        ~Observation(){
+            const auto ns=uint64_t(profileNs()-start);
+            replayCounters.ns.fetch_add(ns);peak(replayCounters.maxNs,ns);
+            peak(replayCounters.peakMesh,bytes);
+            if(ok){++replayCounters.success;replayCounters.samples+=samples;replayCounters.spans+=spans;replayCounters.chords+=chords;}
+            else ++replayCounters.failed;
+        }
+    } observation;
+    constexpr size_t fixedScratch=16u<<10; // rolling state + fitter stack + call stack allowance
+    if(!record || !record->valid() || scratchLimit<fixedScratch || !admits(0,0,fixedScratch)) return false;
+    auto stream=document::CanonicalStream::create(record->brush);
+    if(!stream) return false;
+    try {
+        auto geometry=std::make_shared<CompletedGeometry>();
+        struct Sink {
+            std::array<Mesh,3>& meshes;
+            size_t allowance;
+            Observation& obs;
+            bool append(size_t i,float ax,float ay,float bx,float by,float a,float b) {
+                if(!std::isfinite(ax)||!std::isfinite(ay)||!std::isfinite(bx)||!std::isfinite(by)||
+                   !std::isfinite(a)||!std::isfinite(b)||a<0||b<0||!std::isfinite(std::hypot(bx-ax,by-ay))) return false;
+                auto& m=meshes[i];
+                if(m.capacity()-m.size()<6) {
+                    size_t other=0;
+                    for(size_t j=0;j<3;++j) if(i!=j) other+=meshes[j].capacity();
+                    const auto limit=allowance/sizeof(Vertex);
+                    if(other>limit || m.size()>limit-other || limit-other-m.size()<6) return false;
+                    const size_t required=m.size()+6;
+                    const size_t next=m.size()+std::min(std::max(m.size(),size_t(6)),limit-other-m.size());
+                    if(next<required || !admits((other+next)*sizeof(Vertex),0,fixedScratch)) return false;
+                    m.reserve(next);
+                    if(m.capacity()>limit-other) return false;
+                    obs.bytes=(other+m.capacity())*sizeof(Vertex);
+                }
+                quad(m,ax,ay,bx,by,a,b);++obs.chords;return true;
+            }
+            static bool consume(void* p,const document::ReplaySpan& s) {
+                auto& self=*static_cast<Sink*>(p);
+                if(s.kind==document::ReplaySpan::Terminal) {
+                    if(!self.append(0,s.bx,s.by,s.bx,s.by,s.arrival,s.arrival)) return false;
+                    for(size_t i=1;i<3;++i) if(!s.chords([&](auto... v){return self.append(i,v...);})) return false;
+                    return true;
+                }
+                if(s.kind==document::ReplaySpan::Curve) ++self.obs.spans;
+                const size_t i=size_t(s.kind);
+                return s.chords([&](auto... v){return self.append(i,v...);});
+            }
+        } sink{geometry->derived,allowance,observation};
+        auto& replay=stream.value();
+        auto remaining=std::span(record->samples);
+        while(!remaining.empty()) {
+            const auto n=std::min(remaining.size(),document::wire::chunkSamples);
+            if(!replay.append(remaining.first(n),&sink,Sink::consume)) return false;
+            remaining=remaining.subspan(n);
+        }
+        if(!replay.finish(&sink,Sink::consume)) return false;
         Bounds b;
-        // Post-reconstruction translation: do not refilter displaced samples.
-        for(auto& mesh:scratch.completion->derived) {
-            for(auto& v:mesh) {
-                double x=double(v.x)+dx,y=double(v.y)+dy;
-                if(std::max(std::abs(x),std::abs(y))>std::numeric_limits<float>::max()/1024.) return false;
+        // Preserve v1 float conversion and post-reconstruction translation.
+        for(auto& mesh:geometry->derived) {
+            if(dx!=0 || dy!=0) for(auto& v:mesh) {
+                const double x=double(v.x)+dx,y=double(v.y)+dy;
+                if(!std::isfinite(x)||!std::isfinite(y)||std::max(std::abs(x),std::abs(y))>std::numeric_limits<float>::max()/1024.) return false;
                 v.x=float(x);v.y=float(y);
             }
             b.include(mesh,0);
         }
-        out.minX=b.minX;out.minY=b.minY;out.maxX=b.maxX;out.maxY=b.maxY;
-    }
-    return true;
+        observation.samples=replay.samples();
+        // Record capacity before publication, and retain charge through final owner.
+        for(const auto& m:geometry->derived) geometry->bytes+=m.capacity()*sizeof(Vertex);
+        peak(switchHigh,geometry->bytes+fixedScratch+document::Ink::liveBytes.load()+retainedMeshes.load()+gpuRequested.load());
+        retainedMeshes.fetch_add(geometry->bytes,std::memory_order_relaxed);
+        out={record,{geometry,&geometry->derived[0]},{geometry,&geometry->derived[1]},
+                    {geometry,&geometry->derived[2]},b.minX,b.minY,b.maxX,b.maxY,0};
+        observation.ok=true;return true;
+    } catch(const std::bad_alloc&) {return false;}
+      catch(const std::length_error&) {return false;}
+}
+JNIEXPORT jlongArray JNICALL Java_com_infinipaint_demo_NativeBridge_canonicalReplayCounters(JNIEnv* env,jclass) {
+    const std::array<jlong,11> a={jlong(replayCounters.attempts.load()),jlong(replayCounters.success.load()),
+        jlong(replayCounters.failed.load()),jlong(replayCounters.samples.load()),jlong(replayCounters.spans.load()),
+        jlong(replayCounters.chords.load()),jlong(replayCounters.ns.load()),jlong(replayCounters.maxNs.load()),
+        jlong(replayCounters.peakMesh.load()),jlong(sizeof(document::CanonicalStream)),jlong(16u<<10)};
+    auto array=env->NewLongArray(a.size());if(array)env->SetLongArrayRegion(array,0,a.size(),a.data());return array;
 }
 
 JNIEXPORT jlong JNICALL Java_com_infinipaint_demo_NativeBridge_revision(JNIEnv*,jclass) {
@@ -2417,6 +2485,19 @@ JNIEXPORT jboolean JNICALL Java_com_infinipaint_demo_NativeBridge_needsPublicati
 
 namespace engine::tablet {
 #ifndef __ANDROID__
+// Host-only probe: failures may not mutate the caller's output or leak the
+// completed geometry charge. No scene, GL or planner is involved.
+std::array<bool,3> hostCanonicalReplayProbe(const std::shared_ptr<const document::Ink>& ink,size_t allowance,size_t scratch,double dx) {
+    const auto before=retainedMeshes.load(),owners=sceneOwners.load();
+    bool ok=false,untouched=false;
+    {
+        FinishedTrace out;out.minX=1234.f;
+        ok=reconstructV1(ink,out,dx,0,allowance,scratch);
+        untouched=ok?(out.record==ink&&out.raw&&out.clean&&out.spline&&retainedMeshes.load()>before):
+            (!out.record&&!out.raw&&!out.clean&&!out.spline&&out.minX==1234.f&&retainedMeshes.load()==before);
+    }
+    return {ok,untouched,retainedMeshes.load()==before&&sceneOwners.load()==owners};
+}
 std::array<uint64_t,2> hostOwnerCharges(){return {sceneOwners.load(),liveVboCharge.load()};}
 const void* hostFirstRetiringMesh(){return gpuFinished.begin()->second.source[2]->data();}
 void hostLockMutation(){stateMutex.lock();}

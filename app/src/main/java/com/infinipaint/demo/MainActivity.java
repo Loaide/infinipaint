@@ -4,6 +4,7 @@ package com.infinipaint.demo;
 import android.app.Activity;
 import android.app.AlertDialog;
 import com.infinipaint.storage.EditorStore;
+import com.infinipaint.storage.DocumentDatabase;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.SystemClock;
@@ -126,6 +127,8 @@ public final class MainActivity extends Activity implements EditorStore.Listener
     public void dump(String prefix, FileDescriptor fd, PrintWriter out, String[] args) {
         if(args!=null && args.length==1 && "ip-document".equals(args[0])) {
             out.println(prefix+(documents==null?"Not open":documents.status()));
+            out.println(prefix+"document_open "+(documents==null?"not attached":documents.openDiagnostic()));
+            out.println(prefix+"document_menu outstanding="+ink.outstanding()+" deferred="+(afterInk!=null)+" ownerThis="+(inkOwner==this));
             out.println(prefix+"bytes [uniqueInk,canonicalCharge,retainedMeshes,active,penUpScratchPeak,gpuVbo,"+
                     "gpuVboPeak,historyCharge,saveCharge,savePeak,restoreObservedPeak,uploadScratchPeak,pendingIds,livePublicationCharge,livePublicationChargePeak,publicationRetries] "+
                     java.util.Arrays.toString(NativeBridge.memory()));
@@ -142,6 +145,9 @@ public final class MainActivity extends Activity implements EditorStore.Listener
         out.println(prefix+"spatial [ready,baseRows,overlayRows,diskBytes,diskPeak,dynamicBytes,dynamicPeak,builds,incremental,queries,cancelled,fallbacks,ioFaults,invalid,capacity,reads,cacheHits,spatialPages,boundsTests,overlayNodes,shadowed,candidates,rankLookups,buildNs,buildMaxNs,spatialNs,spatialMaxNs,orderNs,orderMaxNs,queryNs,queryMaxNs,compactions,buildAttempts,queryAttempts,rankCacheHits,overlayActive,successfulQueryNs,successfulSpatialNs,successfulOrderNs,envelopeReuse,indexedPlans,linearPlans,linearTests,indexedFrames,linearFrames,envelopeFrames,planIdsTested,residentFallbackRows] "+java.util.Arrays.toString(NativeBridge.spatialCounters()));
         out.println(prefix+"spatial_latency [16 upper_us,17 success_bucket_counts,max_ns] "+java.util.Arrays.toString(NativeBridge.spatialLatency()));
         out.println(prefix+"paint_order [sequencePages,locatorPages,freePages,writes,writeBytes,reused,splits,merges,borrows,rootCollapses,remaps,spliceAttempts,spliceBatches,spliceFailures,inserted,removed,spliceNs,spliceMaxNs,rankSteps,locatorSteps,maintenanceReads,maintenanceHits,validationChecks,validationRejected,validationNs,validationMaxNs,largeBatches,noCompatibleBase,overlayPreflight,rankCacheShifted,rankCacheDropped,rankCacheSeeded] "+java.util.Arrays.toString(NativeBridge.paintOrderCounters()));
+        out.println(prefix+"canonical_replay [attempts,success,failed,samples,curveSpans,chords,totalNs,maxNs,peakMeshCapacity,stateBytes,scratchReservation] "+java.util.Arrays.toString(NativeBridge.canonicalReplayCounters()));
+        out.println(prefix+"canonical_reads [recordAttempts,verifiedRecords,chunks,rawBytes,targetAttempts,targetSuccess,targetFailure,checksumOrSizeFailure,stale,cancelled,targetNs,targetMaxNs] "+java.util.Arrays.toString(DocumentDatabase.canonicalReadCounters()));
+        out.println(prefix+"canonical_range [admissions,releases,slices,inputBytes,returnedPackets,outputBytes,sliceNs,sliceMaxNs,active,stateBytes,scratchCeiling,sliceSamples] "+java.util.Arrays.toString(DocumentDatabase.canonicalRangeCounters()));
         FrameTelemetry.Snapshot s = frames.snapshot(mark);
         out.printf(Locale.US, "%sIP_FRAMES camera=%d stylus=%d other=%d callbacks=%d withoutPending=%d%n",
                 prefix, s.camera, s.stylus, s.other, s.callbacks, s.withoutPending);
@@ -434,13 +440,20 @@ public final class MainActivity extends Activity implements EditorStore.Listener
         if(ink.blockedTicket()!=null) {recoverPrefix();return;}
         cancelStylus(); resetFingers();
         String[] options={"Undo","Redo",eraseMode?"Use pen":"Whole-stroke eraser","Save / retry","New document","Open next document"};
-        new AlertDialog.Builder(this).setTitle("Document").setItems(options,(d,i)->afterStroke(()->{
-            if(ink.blockedTicket()!=null) {recoverPrefix();return;}
-            if(i<2) documents.command(i+1,null,0);
-            if(i==2) {eraseMode=!eraseMode;notice(eraseMode?"Whole-stroke eraser":"Pen");}
-            if(i==3) documents.flush();
-            if(i>=4) documents.open(i==4,i==5);
-        })).show();
+        new AlertDialog.Builder(this).setTitle("Document").setItems(options,(d,i)->{
+            if(i>=4) android.util.Log.i("IP_DOC_OPEN","Menu "+options[i]+" outstanding="+ink.outstanding()+
+                    " deferred="+(afterInk!=null)+" ownerThis="+(inkOwner==this));
+            afterStroke(()->{
+                if(ink.blockedTicket()!=null) {recoverPrefix();return;}
+                if(i<2) documents.command(i+1,null,0);
+                if(i==2) {eraseMode=!eraseMode;notice(eraseMode?"Whole-stroke eraser":"Pen");}
+                if(i==3) documents.flush();
+                if(i>=4) {
+                    android.util.Log.i("IP_DOC_OPEN","Dispatch "+options[i]);
+                    documents.open(i==4,i==5);
+                }
+            });
+        }).show();
     }
 
     // --------------------------------------------

@@ -1,0 +1,126 @@
+M04 canonical span streaming: observed host output
+Base archive: 4b0710b3e9f099d86aa1ce6973f4964f7a3a3dc7
+GCC C++20 -O2 -Wall -Wextra -Wpedantic -Werror; JDK actual JNI -Xcheck:jni.
+Standalone ASan/UBSan -fno-omit-frame-pointer -no-pie, leak detection.
+Mesa llvmpipe GLES2 via host declarations; no Android SDK/NDK/device run.
+
+=== Final focused stress and actual JNI ===
+Recorded exit: 0
+PASS seed=13792 strokes=30 raw=19415 exact_chords=111865 exact_curve_evaluations=244579 bounds=342944 packets=5892
+PASS failure cases: invalid input, cancellation/poison, terminal rejection, allocation, malformed/truncated/excess samples, range limits, bad version, dot and end sentinel
+PASS allocation-disabled samples=1000000 moving=0 spans=0 emissions=1 replay_ms=37.960 state=512 range_state=94496 range_max_result=21100
+PASS allocation-disabled samples=100000 moving=1 spans=99999 emissions=299998 replay_ms=26.065 state=512 range_state=94496 range_max_result=21100
+PASS seed=1 strokes=30 raw=18406 exact_chords=108894 exact_curve_evaluations=231710 bounds=327649 packets=5078
+PASS seed=2 strokes=30 raw=17096 exact_chords=104556 exact_curve_evaluations=215339 bounds=309289 packets=5328
+PASS seed=3 strokes=30 raw=16329 exact_chords=94546 exact_curve_evaluations=205734 bounds=287963 packets=4890
+PASS seed=4 strokes=30 raw=17550 exact_chords=104782 exact_curve_evaluations=221119 bounds=313883 packets=5768
+PASS seed=5 strokes=30 raw=17315 exact_chords=105145 exact_curve_evaluations=218059 bounds=311940 packets=5350
+PASS seed=6 strokes=30 raw=17120 exact_chords=100114 exact_curve_evaluations=215645 bounds=303175 packets=4848
+PASS seed=7 strokes=30 raw=18251 exact_chords=110037 exact_curve_evaluations=229908 bounds=328419 packets=4728
+PASS seed=8 strokes=30 raw=18174 exact_chords=105811 exact_curve_evaluations=229007 bounds=321656 packets=5118
+PASS seed=9 strokes=30 raw=17923 exact_chords=106864 exact_curve_evaluations=225964 bounds=320192 packets=5164
+PASS seed=10 strokes=30 raw=19743 exact_chords=113022 exact_curve_evaluations=248710 bounds=345507 packets=5594
+PASS seed=11 strokes=30 raw=16542 exact_chords=97570 exact_curve_evaluations=208335 bounds=293149 packets=4990
+PASS seed=12 strokes=30 raw=15257 exact_chords=92447 exact_curve_evaluations=192321 bounds=274896 packets=4170
+PASS seed=13 strokes=30 raw=18057 exact_chords=107887 exact_curve_evaluations=227477 bounds=322383 packets=5038
+PASS seed=14 strokes=30 raw=15796 exact_chords=92940 exact_curve_evaluations=199155 bounds=281253 packets=4942
+PASS seed=15 strokes=30 raw=18113 exact_chords=106397 exact_curve_evaluations=228191 bounds=320516 packets=5534
+PASS seed=16 strokes=30 raw=16340 exact_chords=92645 exact_curve_evaluations=206023 bounds=286431 packets=5342
+PASS seed=17 strokes=30 raw=18055 exact_chords=107281 exact_curve_evaluations=227528 bounds=323055 packets=4840
+PASS seed=18 strokes=30 raw=18154 exact_chords=110639 exact_curve_evaluations=228854 bounds=328892 packets=4704
+PASS seed=19 strokes=30 raw=19345 exact_chords=113825 exact_curve_evaluations=243848 bounds=343806 packets=5602
+PASS seed=20 strokes=30 raw=19838 exact_chords=120958 exact_curve_evaluations=250189 bounds=356909 packets=6004
+PASS seed=21 strokes=30 raw=18708 exact_chords=109222 exact_curve_evaluations=235790 bounds=331487 packets=5912
+PASS seed=22 strokes=30 raw=18502 exact_chords=113041 exact_curve_evaluations=233308 bounds=335072 packets=4878
+PASS seed=23 strokes=30 raw=19501 exact_chords=114884 exact_curve_evaluations=245820 bounds=346142 packets=4660
+PASS seed=24 strokes=30 raw=16999 exact_chords=101257 exact_curve_evaluations=214217 bounds=303784 packets=5228
+PASS seed=25 strokes=30 raw=18452 exact_chords=113111 exact_curve_evaluations=232339 bounds=333554 packets=5092
+PASS seed=26 strokes=30 raw=15373 exact_chords=90223 exact_curve_evaluations=193715 bounds=272359 packets=4988
+PASS seed=27 strokes=30 raw=17744 exact_chords=100455 exact_curve_evaluations=223618 bounds=309597 packets=6300
+PASS seed=28 strokes=30 raw=16794 exact_chords=97826 exact_curve_evaluations=211582 bounds=297234 packets=4914
+PASS seed=29 strokes=30 raw=16893 exact_chords=101008 exact_curve_evaluations=212789 bounds=302270 packets=4336
+PASS seed=30 strokes=30 raw=16297 exact_chords=97059 exact_curve_evaluations=205496 bounds=290461 packets=4898
+PASS seed=31 strokes=30 raw=16309 exact_chords=96829 exact_curve_evaluations=205547 bounds=289939 packets=4792
+PASS seed=32 strokes=30 raw=18216 exact_chords=113015 exact_curve_evaluations=229262 bounds=331620 packets=5052
+PASS seed=33 strokes=30 raw=13818 exact_chords=78478 exact_curve_evaluations=174624 bounds=242522 packets=4284
+PASS seed=34 strokes=30 raw=16287 exact_chords=92738 exact_curve_evaluations=205445 bounds=285795 packets=5552
+PASS seed=35 strokes=30 raw=15078 exact_chords=93277 exact_curve_evaluations=190179 bounds=273121 packets=4808
+PASS seed=36 strokes=30 raw=13280 exact_chords=79023 exact_curve_evaluations=167297 bounds=236808 packets=3994
+PASS seed=37 strokes=30 raw=17229 exact_chords=104415 exact_curve_evaluations=217073 bounds=310003 packets=4660
+PASS seed=38 strokes=30 raw=18573 exact_chords=111853 exact_curve_evaluations=233920 bounds=333654 packets=5086
+PASS seed=39 strokes=30 raw=17219 exact_chords=103170 exact_curve_evaluations=217022 bounds=308128 packets=5560
+PASS seed=40 strokes=30 raw=14996 exact_chords=93701 exact_curve_evaluations=188887 bounds=272251 packets=4528
+PASS seed=4294967295 strokes=30 raw=17225 exact_chords=95642 exact_curve_evaluations=217022 bounds=298152 packets=6376
+PASS real JNI range: partition parity, exact overlapping packet, terminal, stale/busy tokens, extent checks, partial finish, 100 discard cycles, zero active leases: [108, 108, 668, 890892, 7, 64224, 7670502, 222836, 0, 94496, 262144, 64]
+
+=== Final production smoke/regressions ===
+Recorded exit: 0
+PASS bridge: incremental VBO, real One-Euro/spline/preset geometry differences, lazy uploads, culling, zoom, same-time, context restore, clear, zero unrelated undo upload; incremental_bytes=2376
+PASS production canonical replay: 31 allocation failures, four mesh budget failures, scratch and translation rejection, charge lifetime and exact retry
+PASS parked GL switch rejected at slice=63974399; identical retry fits after 64 patch nodes retire; cancel retained/released 95544 live VBO bytes
+PASS M04.3-B: parked mutation, contended publication, retry, live/commit handoff, context rebuild
+PASS M04.3-C planner: exact fallback, stale camera, ordered delta/epoch backpressure, bounded live retirement, context recovery; hits=20 fallback=11 backpressure=8 retired=9
+PASS live prefix: 8193 values, concurrent frozen count, group rollover, allocation rollback, final-owner credit
+PASS scheduler: 200000 ordered moves, full ownership, 200000 latest publications, coalesced wake delivery
+PASS InkLane: parked consumer, FIFO, terminal reserve, bounded saturation, 100 reuse cycles, idle interrupt
+PASS deterministic mixed gesture stress: 5329 strokes
+PASS production InkPipeline: FIFO, both blocked phases, repeated retry/discard, reserved terminal, sample failure, cancel races, bounded callbacks
+
+=== MAX coverage pixels ===
+Recorded exit: 0
+GL_VERSION=OpenGL ES 2.0 Mesa 25.0.7-2 GL_RENDERER=llvmpipe (LLVM 19.1.7, 256 bits)
+verified context coverage path: max_blend=1
+mode=0 live width_px=1.83/2.96/4.06/5.22
+mode=0 completed width_px=1.83/2.96/4.06/5.22
+mode=0 pen_up changed_pixels=0 sum_max_rgb_delta=0
+mode=2 live width_px=1.84/2.97/4.07/5.25
+mode=2 completed width_px=1.84/2.97/4.07/5.25
+mode=2 pen_up changed_pixels=0 sum_max_rgb_delta=0
+composite order probe red: thick_only=51 thick_last=51 thin_last=85
+equivalent path max RGB delta=0/255
+equivalent path max RGB delta=0/255
+equivalent path max RGB delta=0/255
+equivalent path max RGB delta=0/255
+PASS: 300-sample live paged prefix and sealed four-mode context parity
+PASS: v1 codec and reconstruction vertex bytes + 4-mode RGBA parity
+PASS: 4097-sample canonical chunk boundary, exact vertex bytes, 48 four-mode RGBA comparisons after context recreation
+PASS spatial RGBA fixture: 171 extra exact comparisons, multi-page crossings, alpha, zoom, motion, context, disk fault, epoch, overlay and counted middle-splice undo/redo
+PASS: production GLES2 shader, pressure dots/taper, pen-up, and completed order
+PASS: 351 matched-plan versus exact-fallback RGBA frames
+
+=== Fallback coverage pixels ===
+Recorded exit: 0
+Warning: extension 'GL_EXT_blend_minmax' cannot be disabled
+GL_VERSION=OpenGL ES 2.0 Mesa 25.0.7-2 GL_RENDERER=llvmpipe (LLVM 19.1.7, 256 bits)
+verified context coverage path: max_blend=0
+mode=0 live width_px=1.88/3.00/4.00/5.25
+mode=0 completed width_px=1.88/3.00/4.00/5.25
+mode=0 pen_up changed_pixels=0 sum_max_rgb_delta=0
+mode=2 live width_px=1.88/3.00/4.12/5.25
+mode=2 completed width_px=1.88/3.00/4.12/5.25
+mode=2 pen_up changed_pixels=0 sum_max_rgb_delta=0
+composite order probe red: thick_only=51 thick_last=51 thin_last=85
+equivalent path max RGB delta=0/255
+equivalent path max RGB delta=0/255
+equivalent path max RGB delta=0/255
+equivalent path max RGB delta=0/255
+PASS: 300-sample live paged prefix and sealed four-mode context parity
+PASS: v1 codec and reconstruction vertex bytes + 4-mode RGBA parity
+PASS: 4097-sample canonical chunk boundary, exact vertex bytes, 48 four-mode RGBA comparisons after context recreation
+PASS spatial RGBA fixture: 171 extra exact comparisons, multi-page crossings, alpha, zoom, motion, context, disk fault, epoch, overlay and counted middle-splice undo/redo
+PASS: production GLES2 shader, pressure dots/taper, pen-up, and completed order
+PASS: 351 matched-plan versus exact-fallback RGBA frames
+
+=== Standalone sanitizer seed/fault/scale ===
+Recorded exit: 0
+PASS seed=13792 strokes=30 raw=19415 exact_chords=111865 exact_curve_evaluations=244579 bounds=342944 packets=5892
+PASS failure cases: invalid input, cancellation/poison, terminal rejection, allocation, malformed/truncated/excess samples, range limits, bad version, dot and end sentinel
+PASS allocation-disabled samples=1000000 moving=0 spans=0 emissions=1 replay_ms=483.457 state=512 range_state=94496 range_max_result=21100
+PASS allocation-disabled samples=100000 moving=1 spans=99999 emissions=299998 replay_ms=429.390 state=512 range_state=94496 range_max_result=21100
+
+=== Document regression ===
+PASS M03 v1 codec, reversible splices, history, ID ranges, seeded 10000-step ordered oracle, queue reserve/saturation/retry
+PASS grouped edit: 7 injected allocation failures leave membership, IDs, revision, queue and budgets retryable
+
+Final seeded totals (not counting exploratory runs): 42 seeds; 1260 strokes; 726312 samples; 4308452 exact chords; 9152647 exact curve evaluations; 12947860 bounds; 214822 range packets.
+Additional Clang seed 24680: 30 strokes; 16897 samples; 99914 chords; 212738 curve evaluations; 300238 bounds; 5790 packets; fault suite passed.

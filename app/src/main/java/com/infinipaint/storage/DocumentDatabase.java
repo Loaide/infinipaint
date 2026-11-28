@@ -13,6 +13,10 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.UUID;
+import java.util.Objects;
+import java.util.concurrent.CancellationException;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.BooleanSupplier;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 
@@ -337,11 +341,74 @@ public final class DocumentDatabase implements Closeable {
 
     /** Consumer builds an isolated candidate, never the current document. Discard it
      * on ANY exception, including a digest mismatch after the final chunk. */
-    public interface Restore {
-        void begin(UUID id,long revision,long ceiling,long count);
+    public interface RecordSink {
         void stroke(long id,long prev,long next,long content,long geometry,int samples,byte[] header);
         void chunk(byte[] bytes);
         void endStroke();
+    }
+    public interface Restore extends RecordSink {
+        void begin(UUID id,long revision,long ceiling,long count);
+    }
+    // Cumulative process counters. Full-load successes mean a verified record,
+    // not that the entire document was subsequently activated.
+    private static final AtomicLong[] READS = new AtomicLong[12];
+    static {for(int i=0;i<READS.length;i++) READS[i]=new AtomicLong();}
+    public static long[] canonicalReadCounters() {
+        long[] values=new long[READS.length];
+        for(int i=0;i<values.length;i++) values[i]=READS[i].get();
+        return values;
+    }
+    private static void checkCancelled(BooleanSupplier cancelled) {
+        if(cancelled.getAsBoolean()) throw new CancellationException("Obsolete canonical request");
+    }
+    private static final class RecordRead {
+        final long prev,next,bytes;
+        RecordRead(long prev,long next,long bytes) {this.prev=prev;this.next=next;this.bytes=bytes;}
+    }
+    private RecordRead streamRecord(String key,long record,long previous,long rev,long ceiling,
+            long expectedContent,long expectedGeometry,long maxSampleBytes,
+            BooleanSupplier cancelled,RecordSink into) {
+        if(record<=0 || record>ceiling) throw new SQLiteException("Invalid linked identity");
+        String[] args={key,Long.toString(record)};
+        checkCancelled(cancelled);
+        READS[0].incrementAndGet();
+        try(Cursor c=db.rawQuery("SELECT prev,next,content_rev,geometry_rev,samples,length(header)," +
+                "substr(header,1,80),length(digest),substr(digest,1,32) FROM stroke WHERE doc=? AND id=?",args)) {
+            if(!c.moveToFirst() || (previous>=0 && c.getLong(0)!=previous))
+                throw new SQLiteException("Broken order chain");
+            long prev=c.getLong(0),next=c.getLong(1),content=c.getLong(2),geometry=c.getLong(3),n=c.getLong(4);
+            if(prev<0 || prev>ceiling || next<0 || next>ceiling || prev==record || next==record ||
+                    content<=0 || content>rev || geometry<=0 || geometry>content || n<=0 ||
+                    n>1000000 || n*36>maxSampleBytes || c.getLong(5)!=80 || c.getLong(7)!=32)
+                throw new SQLiteException("Invalid stroke header or load budget");
+            if(expectedContent>0 && (content!=expectedContent || geometry!=expectedGeometry)) {
+                READS[8].incrementAndGet();throw new SQLiteException("Stale stroke revisions");
+            }
+            byte[] header=c.getBlob(6),digest=c.getBlob(8);
+            if(header.length!=80 || digest.length!=32) throw new SQLiteException("Malformed header blob");
+            MessageDigest hash=sha();hash.update(header);
+            into.stroke(record,prev,next,content,geometry,(int)n,header);
+            long remaining=n*36;
+            try(Cursor chunks=db.rawQuery("SELECT ordinal,length(data),substr(data,1,"+CHUNK_BYTES+
+                    ") FROM chunk WHERE doc=? AND id=? ORDER BY ordinal",args)) {
+                int ordinal=0;
+                while(chunks.moveToNext()) {
+                    checkCancelled(cancelled);
+                    if(remaining==0 || chunks.getLong(0)!=ordinal++ ||
+                            chunks.getLong(1)!=Math.min(remaining,CHUNK_BYTES))
+                        throw new SQLiteException("Malformed sample chunk");
+                    byte[] data=chunks.getBlob(2);
+                    if(data.length!=Math.min(remaining,CHUNK_BYTES)) throw new SQLiteException("Malformed sample blob");
+                    hash.update(data);READS[2].incrementAndGet();READS[3].addAndGet(data.length);
+                    into.chunk(data);remaining-=data.length;
+                }
+            }
+            if(remaining!=0 || !MessageDigest.isEqual(hash.digest(),digest)) {
+                READS[7].incrementAndGet();throw new SQLiteException("Stroke checksum or size mismatch");
+            }
+            checkCancelled(cancelled);into.endStroke();READS[1].incrementAndGet();
+            return new RecordRead(prev,next,n*36);
+        }
     }
     public void load(UUID id,long maxRecords,long maxSampleBytes,Restore into) {
         checkThread();
@@ -360,44 +427,101 @@ public final class DocumentDatabase implements Closeable {
             }
             into.begin(id,rev,ceiling,count);
             long record=head,previous=0;
-            // A reciprocal predecessor at each step + sentinel endpoints forbids
-            // revisiting a node; exactly count steps leaves no unreachable records.
+            // Complete validation remains mandatory before document selection.
             for(long i=0;i<count;i++) {
-                if(record<=0 || record>ceiling) throw new SQLiteException("Invalid linked identity");
-                String[] args={key,Long.toString(record)};
-                try(Cursor c=db.rawQuery("SELECT prev,next,content_rev,geometry_rev,samples,length(header)," +
-                        "substr(header,1,80),length(digest),substr(digest,1,32) FROM stroke WHERE doc=? AND id=?",args)) {
-                    if(!c.moveToFirst() || c.getLong(0)!=previous) throw new SQLiteException("Broken order chain");
-                    long next=c.getLong(1),content=c.getLong(2),geometry=c.getLong(3),n=c.getLong(4);
-                    if(content<=0 || content>rev || geometry<=0 || geometry>content || n<=0 ||
-                            n>1000000 || n*36>maxSampleBytes || c.getLong(5)!=80 || c.getLong(7)!=32)
-                        throw new SQLiteException("Invalid stroke header or load budget");
-                    byte[] header=c.getBlob(6),digest=c.getBlob(8);
-                    maxSampleBytes-=n*36;
-                    MessageDigest hash=sha();
-                    hash.update(header);
-                    into.stroke(record,previous,next,content,geometry,(int)n,header);
-                    long remaining=n*36;
-                    try(Cursor chunks=db.rawQuery("SELECT ordinal,length(data),substr(data,1,"+CHUNK_BYTES+
-                            ") FROM chunk WHERE doc=? AND id=? ORDER BY ordinal",args)) {
-                        int ordinal=0;
-                        while(chunks.moveToNext()) {
-                            if(remaining==0 || chunks.getLong(0)!=ordinal++ ||
-                                    chunks.getLong(1)!=Math.min(remaining,CHUNK_BYTES))
-                                throw new SQLiteException("Malformed sample chunk");
-                            byte[] data=chunks.getBlob(2);
-                            hash.update(data); into.chunk(data); remaining-=data.length;
-                        }
-                    }
-                    if(remaining!=0 || !MessageDigest.isEqual(hash.digest(),digest))
-                        throw new SQLiteException("Stroke checksum or size mismatch");
-                    into.endStroke();
-                    previous=record; record=next;
-                }
+                RecordRead read=streamRecord(key,record,previous,rev,ceiling,0,0,maxSampleBytes,()->false,into);
+                maxSampleBytes-=read.bytes;previous=record;record=read.next;
             }
             if(record!=0 || previous!=tail) throw new SQLiteException("Invalid document tail");
             db.setTransactionSuccessful();
         } finally { db.endTransaction(); }
+    }
+    /** Targeted read of a single canonical record under an exact durable revision.
+     * Does NOT validate the entire document/order root. The caller must already
+     * have validated that root and must discard the sink on ANY failure. Pending
+     * visible edits are not part of this durable snapshot. */
+    void readStroke(UUID doc,long revision,long id,long content,long geometry,long maxSampleBytes,
+                    BooleanSupplier cancelled,RecordSink into) {
+        checkThread();Objects.requireNonNull(doc);Objects.requireNonNull(cancelled);Objects.requireNonNull(into);
+        if(revision<=0||id<=0||content<=0||content>revision||geometry<=0||geometry>content||maxSampleBytes<36)
+            throw new IllegalArgumentException("Invalid canonical read request");
+        READS[4].incrementAndGet();long start=System.nanoTime();
+        try {
+            checkCancelled(cancelled);
+            String key=doc.toString();
+            db.beginTransactionNonExclusive();
+            try(Cursor meta=db.rawQuery("SELECT revision,ceiling,head,tail,count FROM document WHERE uuid=?",new String[]{key})) {
+                if(!meta.moveToFirst()||meta.getLong(0)!=revision) {
+                    READS[8].incrementAndGet();throw new SQLiteException("Stale document revision");
+                }
+                long ceiling=meta.getLong(1),head=meta.getLong(2),tail=meta.getLong(3);
+                if(ceiling<id||head<=0||head>ceiling||tail<=0||tail>ceiling||meta.getLong(4)<=0)
+                    throw new SQLiteException("Invalid document root");
+                RecordRead read=streamRecord(key,id,-1,revision,ceiling,content,geometry,maxSampleBytes,cancelled,into);
+                // A targeted read also checks its immediate reciprocal links.
+                // Complete chain validation remains the responsibility of load.
+                if((read.prev==0)!=(head==id)||(read.next==0)!=(tail==id)||
+                        (read.prev!=0&&!linked(key,read.prev,"next",id))||
+                        (read.next!=0&&!linked(key,read.next,"prev",id)))
+                    throw new SQLiteException("Invalid canonical order neighbor");
+                checkCancelled(cancelled);db.setTransactionSuccessful();
+            } finally {db.endTransaction();}
+            checkCancelled(cancelled);READS[5].incrementAndGet();
+        } catch(CancellationException e) {READS[9].incrementAndGet();throw e;}
+          catch(RuntimeException | Error e) {READS[6].incrementAndGet();throw e;}
+        finally {long ns=System.nanoTime()-start;READS[10].addAndGet(ns);READS[11].accumulateAndGet(ns,Math::max);}
+    }
+
+    private boolean linked(String doc,long id,String column,long expected) {
+        try(Cursor c=db.rawQuery("SELECT "+column+" FROM stroke WHERE doc=? AND id=?",
+                new String[]{doc,Long.toString(id)})) {return c.moveToFirst()&&c.getLong(0)==expected;}
+    }
+    public static long[] canonicalRangeCounters() {return StorePort.rangeCounters();}
+    /** One verified, bounded spline-interval page. The exact revision and
+     * geometry identity travel with the data. Consumers must revalidate the
+     * desired scene before publishing it. No pending/unsaved edits are read.
+     * The final packet of a stroke is its terminal connector/dab. */
+    static final class CurveRange {
+        final UUID doc;
+        final long revision,id,content,geometry;
+        private final byte[] data;
+        CurveRange(UUID doc,long revision,long id,long content,long geometry,byte[] data) {
+            this.doc=doc;this.revision=revision;this.id=id;this.content=content;this.geometry=geometry;
+            this.data=Objects.requireNonNull(data);
+        }
+        java.nio.ByteBuffer packet() {
+            return java.nio.ByteBuffer.wrap(data).asReadOnlyBuffer().order(java.nio.ByteOrder.LITTLE_ENDIAN);
+        }
+    }
+    /** Requested interval ordinals are independent of input chunk boundaries.
+     * The v1 filter is stateful, so this implementation replays the requested
+     * stroke from its beginning, never the entire document. No persistent
+     * checkpoints or page-addressed coefficient cache yet. */
+    CurveRange readCurveRange(UUID doc,long revision,long id,long content,long geometry,
+                              int first,int count,long maxSampleBytes,BooleanSupplier cancelled) {
+        checkThread();
+        if(first<0||first>1000000||count<=0||count>128||(long)first+count>1000001)
+            throw new IllegalArgumentException("Invalid curve range");
+        final long[] token={0};final byte[][] packet={null};
+        try {
+            readStroke(doc,revision,id,content,geometry,maxSampleBytes,cancelled,new RecordSink() {
+                public void stroke(long i,long prev,long next,long cr,long gr,int samples,byte[] header) {
+                    token[0]=StorePort.rangeBegin(header,samples,first,count);
+                    if(token[0]<=0) throw new IllegalStateException("Curve range admission failed");
+                }
+                public void chunk(byte[] bytes) {
+                    // Check for obsolete intent between bounded decode slices;
+                    // no additional Java chunk copy and no time-limit claim.
+                    final int slice=64*36;
+                    for(int offset=0;offset<bytes.length;offset+=slice) {
+                        checkCancelled(cancelled);
+                        StorePort.rangeChunk(token[0],bytes,offset,Math.min(slice,bytes.length-offset));
+                    }
+                }
+                public void endStroke() {packet[0]=Objects.requireNonNull(StorePort.rangeFinish(token[0]));}
+            });
+            return new CurveRange(doc,revision,id,content,geometry,packet[0]);
+        } finally {if(token[0]!=0) StorePort.rangeDiscard(token[0]);}
     }
 
     /** Caller's coalescer supplies monotonically increasing per-document view sequence. */

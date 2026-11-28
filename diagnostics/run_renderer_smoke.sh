@@ -10,6 +10,7 @@ c++ -std=c++20 -O2 -Wall -Wextra -Wpedantic -Werror \
   app/src/main/cpp/input/input_processor.cpp \
   app/src/main/cpp/stroke/spline.cpp -o /tmp/infinipaint_renderer_smoke
 /tmp/infinipaint_renderer_smoke
+/tmp/infinipaint_renderer_smoke canonical
 /tmp/infinipaint_renderer_smoke owners
 /tmp/infinipaint_renderer_smoke isolation
 /tmp/infinipaint_renderer_smoke planner
