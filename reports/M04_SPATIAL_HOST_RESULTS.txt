@@ -1,0 +1,87 @@
+M04 spatial access — actual host verification output
+Baseline 107b6fb6c1de2535afe8eebda3d8f5d64a3b73b6
+All recorded commands exited 0. Host timing is not Android timing.
+Final 20% prefetch margin used in bridge/pixel/smoke runs. Independent page header unchanged.
+
+Strict GCC C++20 spatial tests + 12 additional seeds:
+seed=13792 edits=1200 ordered_oracle=3634 fast=1115 rebuilds=86 compactions=0 peak_disk=442368 peak_dynamic=80512
+PASS 7 allocation failure points and real partial-write fault
+PASS fault injection, cancellation, capacity, overlay compaction, incomplete delta
+PASS dense 65,537 overlaps: strict overflow and complete ordered control
+N=1000 k=256 build_ms=0.914 first_query_us=248.595 p50_us=7.932 p95_us=8.333 max_us=248.595 spatial_pages/query=5.00 bounds/query=272.00 reads/query=0.033 rank_lookups/query=256.00 disk=360448 dynamic_peak=64512
+N=10000 k=256 build_ms=7.308 first_query_us=669.469 p50_us=8.583 p95_us=9.013 max_us=669.469 spatial_pages/query=6.00 bounds/query=323.00 reads/query=0.093 rank_lookups/query=256.00 disk=3309568 dynamic_peak=645024
+N=100000 k=256 build_ms=80.611 first_query_us=1131.686 p50_us=5.669 p95_us=5.709 max_us=1131.686 spatial_pages/query=6.00 bounds/query=345.00 reads/query=0.170 rank_lookups/query=256.00 disk=32489472 dynamic_peak=6450016
+seed=1 edits=1500 ordered_oracle=4542 fast=1377 rebuilds=124 compactions=0 peak_disk=491520 peak_dynamic=88128
+seed=2 edits=1500 ordered_oracle=4542 fast=1376 rebuilds=125 compactions=0 peak_disk=475136 peak_dynamic=82784
+seed=3 edits=1500 ordered_oracle=4542 fast=1390 rebuilds=111 compactions=0 peak_disk=507904 peak_dynamic=91104
+seed=4 edits=1500 ordered_oracle=4542 fast=1374 rebuilds=127 compactions=0 peak_disk=475136 peak_dynamic=83296
+seed=5 edits=1500 ordered_oracle=4542 fast=1388 rebuilds=113 compactions=0 peak_disk=491520 peak_dynamic=88576
+seed=17 edits=1500 ordered_oracle=4542 fast=1387 rebuilds=114 compactions=0 peak_disk=475136 peak_dynamic=84576
+seed=23 edits=1500 ordered_oracle=4542 fast=1379 rebuilds=122 compactions=0 peak_disk=442368 peak_dynamic=79360
+seed=13792 edits=1500 ordered_oracle=4542 fast=1400 rebuilds=101 compactions=0 peak_disk=491520 peak_dynamic=87872
+seed=27182 edits=1500 ordered_oracle=4542 fast=1361 rebuilds=140 compactions=0 peak_disk=524288 peak_dynamic=97216
+seed=31415 edits=1500 ordered_oracle=4542 fast=1382 rebuilds=119 compactions=0 peak_disk=475136 peak_dynamic=86368
+seed=65537 edits=1500 ordered_oracle=4542 fast=1361 rebuilds=140 compactions=0 peak_disk=524288 peak_dynamic=97280
+seed=4294967295 edits=1500 ordered_oracle=4542 fast=1377 rebuilds=124 compactions=0 peak_disk=442368 peak_dynamic=82496
+
+Standalone Clang ASan/UBSan + leak detection:
+seed=13792 edits=1200 ordered_oracle=3634 fast=1115 rebuilds=86 compactions=0 peak_disk=442368 peak_dynamic=80512
+PASS 7 allocation failure points and real partial-write fault
+PASS fault injection, cancellation, capacity, overlay compaction, incomplete delta
+PASS dense 65,537 overlaps: strict overflow and complete ordered control
+
+Production bridge + scheduler + Java regressions (first run of final suite):
+PASS bridge: incremental VBO, real One-Euro/spline/preset geometry differences, lazy uploads, culling, zoom, same-time, context restore, clear, zero unrelated undo upload; incremental_bytes=2376
+PASS parked GL switch rejected at slice=64161023; identical retry fits after 64 patch nodes retire; cancel retained/released 95544 live VBO bytes
+PASS M04.3-B: parked mutation, contended publication, retry, live/commit handoff, context rebuild
+PASS M04.3-C planner: exact fallback, stale camera, ordered delta/epoch backpressure, bounded live retirement, context recovery; hits=20 fallback=11 backpressure=8 retired=9
+PASS live prefix: 8193 values, concurrent frozen count, group rollover, allocation rollback, final-owner credit
+PASS scheduler: 200000 ordered moves, full ownership, 200000 latest publications, coalesced wake delivery
+PASS InkLane: parked consumer, FIFO, terminal reserve, bounded saturation, 100 reuse cycles, idle interrupt
+PASS deterministic mixed gesture stress: 5329 strokes
+PASS production InkPipeline: FIFO, both blocked phases, repeated retry/discard, reserved terminal, sample failure, cancel races, bounded callbacks
+Additional repeated planner test: 50/50 passed (51 total with suite run).
+
+Existing M03 document tests:
+PASS M03 v1 codec, reversible splices, history, ID ranges, seeded 10000-step ordered oracle, queue reserve/saturation/retry
+PASS grouped edit: 7 injected allocation failures leave membership, IDs, revision, queue and budgets retryable
+
+Actual Mesa GLES2 pixel output (final bridge, both modes):
+GL_VERSION=OpenGL ES 2.0 Mesa 25.0.7-2 GL_RENDERER=llvmpipe (LLVM 19.1.7, 256 bits)
+verified context coverage path: max_blend=1
+mode=0 live width_px=1.83/2.96/4.06/5.22
+mode=0 completed width_px=1.83/2.96/4.06/5.22
+mode=0 pen_up changed_pixels=0 sum_max_rgb_delta=0
+mode=2 live width_px=1.84/2.97/4.07/5.25
+mode=2 completed width_px=1.84/2.97/4.07/5.25
+mode=2 pen_up changed_pixels=0 sum_max_rgb_delta=0
+composite order probe red: thick_only=51 thick_last=51 thin_last=85
+equivalent path max RGB delta=0/255
+equivalent path max RGB delta=0/255
+equivalent path max RGB delta=0/255
+equivalent path max RGB delta=0/255
+PASS: 300-sample live paged prefix and sealed four-mode context parity
+PASS: v1 codec and reconstruction vertex bytes + 4-mode RGBA parity
+PASS spatial RGBA fixture: 133 extra exact comparisons, multi-page crossings, alpha, zoom, motion, context, disk fault, epoch, overlay undo/redo
+PASS: production GLES2 shader, pressure dots/taper, pen-up, and completed order
+PASS: 218 matched-plan versus exact-fallback RGBA frames
+Warning: extension 'GL_EXT_blend_minmax' cannot be disabled
+GL_VERSION=OpenGL ES 2.0 Mesa 25.0.7-2 GL_RENDERER=llvmpipe (LLVM 19.1.7, 256 bits)
+verified context coverage path: max_blend=0
+mode=0 live width_px=1.88/3.00/4.00/5.25
+mode=0 completed width_px=1.88/3.00/4.00/5.25
+mode=0 pen_up changed_pixels=0 sum_max_rgb_delta=0
+mode=2 live width_px=1.88/3.00/4.12/5.25
+mode=2 completed width_px=1.88/3.00/4.12/5.25
+mode=2 pen_up changed_pixels=0 sum_max_rgb_delta=0
+composite order probe red: thick_only=51 thick_last=51 thin_last=85
+equivalent path max RGB delta=0/255
+equivalent path max RGB delta=0/255
+equivalent path max RGB delta=0/255
+equivalent path max RGB delta=0/255
+diagonal taper fallback vs MAX max RGB delta=8/255
+PASS: 300-sample live paged prefix and sealed four-mode context parity
+PASS: v1 codec and reconstruction vertex bytes + 4-mode RGBA parity
+PASS spatial RGBA fixture: 133 extra exact comparisons, multi-page crossings, alpha, zoom, motion, context, disk fault, epoch, overlay undo/redo
+PASS: production GLES2 shader, pressure dots/taper, pen-up, and completed order
+PASS: 218 matched-plan versus exact-fallback RGBA frames

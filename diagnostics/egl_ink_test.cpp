@@ -22,7 +22,7 @@ extern "C" jint Java_com_infinipaint_demo_NativeBridge_command(JNIEnv*,jclass,ji
 #include <vector>
 #include <thread>
 #include <chrono>
-namespace engine::tablet {void hostStartPlanner();void hostForcePlannerFallback(bool);std::array<uint64_t,8> hostPlannerStats();}
+namespace engine::tablet {void hostStartPlanner();void hostForcePlannerFallback(bool);std::array<uint64_t,8> hostPlannerStats();std::array<uint64_t,39> hostSpatialStats();std::array<uint64_t,5> hostSpatialFrameStats();void hostSpatialFault(int);}
 extern "C" jboolean Java_com_infinipaint_demo_NativeBridge_needsPublicationRetry(JNIEnv*,jclass);
 
 static int observedMax=-1;
@@ -399,6 +399,104 @@ void comparePortableRamp() {
         check(max<=10,"fallback exceeds half a coverage step plus rounding");
     }
 }
+
+#ifdef IP_REPLAY_TEST
+void spatialPixelOracle(Pbuffer& pbuffer,const Pixel& background) {
+    using namespace engine::document;
+    using namespace engine::tablet;
+    using namespace std::chrono_literals;
+    if(!planTest)return;
+    const auto startComparisons=planComparisons;
+    const auto startStats=hostSpatialStats();
+    auto makeScene=[&](int version) {
+        auto d=std::make_unique<Document>(Uuid{uint8_t(91+version)});
+        constexpr int total=521;Id prev=0;
+        for(int j=0;j<total;++j) {
+            // Permute stable IDs independently of paint order and locality.
+            const Id id=(j*127)%total+1;
+            Brush brush;brush.radiusWorld=2.4f+float(j%3)*.3f;
+            brush.rgba=j%2?std::array<float,4>{.9f,.1f,.2f,.45f}:std::array<float,4>{.1f,.2f,.95f,.55f};
+            engine::input::RawInputStroke samples;
+            if(j==0) {
+                // Independent coverage witness across many spatial regions.
+                brush.radiusWorld=2.8f;brush.rgba={.1f,.9f,.2f,1};
+                samples={{{-4096.,32.5},1,.8f,0,0},{{4096.,32.5},2,.8f,0,0}};
+            }else if(j<16) {
+                // Both endpoints outside the viewport. Long crossing chords,
+                // self-overlap, changing width and reversed paint order.
+                const double y=5.5+double(j%8)*6.0;
+                const double left=j%2?-3500.-j*120.:-200.,right=j%2?200.:3500.+j*120.;
+                samples={{{left,y},1,.35f,0,0},{{-8.5,y-4.0},2,.85f,0,0},
+                    {{55.5,y+4.0},3,.65f,0,0},{{right,y},4,.4f,0,0}};
+                if(j%4==0)samples.push_back({{left,y},5,.75f,0,0});
+            } else {
+                const int k=j-16;
+                // Distributed dots on both sides of STR leaf boundaries and
+                // across negative world coordinates; their IDs are scattered.
+                const double x=double((k%37)-18)*193.0+.5,y=double((k/37)-6)*173.0+.5;
+                samples={{{x,y},1,float(j%9)/8.f,0,0}};
+            }
+            if(version)std::swap(brush.rgba[0],brush.rgba[2]);
+            check(d->restore(id,prev,Value{std::make_shared<const Ink>(std::move(samples),brush)},1,1,1,total)==Status::Ok,"restore spatial pixel fixture");prev=id;
+        }
+        check(d->finishRestore(1,total)==Status::Ok&&d->grant(total+1,total+200),"spatial fixture restore");
+        return d;
+    };
+    Java_com_infinipaint_demo_NativeBridge_suspend(nullptr,nullptr,true);
+    check(stage(makeScene(0),96u<<20),"stage multi-page spatial scene");activate(0,0,1);discard();
+    auto camera=[](double x,double y,double z){Java_com_infinipaint_demo_NativeBridge_setCamera(nullptr,nullptr,x,y,z);};
+    auto original=render(spline);
+    check(rgbDelta(at(original,60,24),background)>8,"crossing ink actually rendered");
+    check(hostSpatialStats()[0]==1&&hostSpatialStats()[1]>=521&&hostSpatialStats()[9]>startStats[9],"disk-backed spatial path used, not just resident fallback");
+    const auto motionStart=hostSpatialFrameStats();
+    const auto faultFreeStart=hostSpatialStats();
+    // A crossing stroke with endpoints far outside the viewport must never
+    // develop a gap at any spatial page boundary. The resident oracle alone
+    // would not catch a preexisting error in both paths, so assert coverage.
+    for(int i=-8;i<=8;++i){camera(i*384.,0,1);const auto frame=render(spline);
+        for(int x=0;x<width;++x)check(rgbDelta(at(frame,x,32),background)>30,"long crossing centerline gap");}
+    // Trace through packed pages and prefetch boundaries, including the
+    // smallest/largest supported zoom and subpixel camera offsets.
+    for(int i=0;i<70;++i) {
+        const double x=(i<35?i:69-i)*17.25-288.0;
+        const double y=double((i*13)%21)-10.25;
+        const double z=i%14==0?.1:i%13==0?16.0:i%5==0?2.0:1.0;
+        camera(x,y,z);(void)render(i%4);
+    }
+    for(int i=0;i<36;++i){camera(double((i%12)-6)*193+.5,double((i/12)-1)*173+.5,1.0);(void)render(spline);}
+    camera(0,0,1);check(render(spline)==original,"round-trip viewport parity across spatial pages");
+    const auto motionEnd=hostSpatialFrameStats();const auto faultFreeEnd=hostSpatialStats();
+    check(motionEnd[0]>motionStart[0]+100&&motionEnd[1]==motionStart[1]&&motionEnd[2]>motionStart[2],"indexed and reused-envelope frame path exercised without linear worker plans");
+    check(faultFreeEnd[11]==faultFreeStart[11]&&faultFreeEnd[12]==faultFreeStart[12]&&faultFreeEnd[13]==faultFreeStart[13],"no hidden index fallback/fault during motion");
+    pbuffer.recreate();check(render(spline)==original,"spatial context recovery");
+    // Deterministic disk fault. The current generation must stop answering;
+    // a full resident reference plan remains valid, never partial/blank ink.
+    auto faults=hostSpatialStats()[13];hostSpatialFault(1);
+    const auto deadline=std::chrono::steady_clock::now()+5s;
+    while(hostSpatialStats()[13]==faults){(void)render(spline);check(std::chrono::steady_clock::now()<deadline,"page corruption handled");std::this_thread::sleep_for(1ms);}
+    check(render(spline)==original&&!hostSpatialStats()[0],"corruption fallback pixel equality");
+    // Switch uses same local IDs, different epoch and color order. Old
+    // scratch roots and cache ranks must not survive the transition.
+    check(stage(makeScene(1),96u<<20),"stage second spatial scene");activate(0,0,1);discard();
+    auto switched=render(spline);check(switched!=original&&hostSpatialStats()[0]==1,"new epoch rebuild and paint colors");
+    // Append overlay, remove via undo and reinsert via redo; exact pixels
+    // at each revision, not just a numeric order oracle.
+    Java_com_infinipaint_demo_NativeBridge_suspend(nullptr,nullptr,false);
+    const auto beforeAppend=hostSpatialStats();
+    begin(77);sample(77,41,26,20,1);sample(77,88,26,20.1,.6f);end(77);
+    auto appended=render(spline);const auto afterAppend=hostSpatialStats();
+    check(appended!=switched&&afterAppend[3]>0&&afterAppend[7]==beforeAppend[7]&&afterAppend[8]>beforeAppend[8]&&afterAppend[2]>0,"appended overlay appears over unchanged packed base");
+    Java_com_infinipaint_demo_NativeBridge_suspend(nullptr,nullptr,true);
+    check(Java_com_infinipaint_demo_NativeBridge_command(nullptr,nullptr,1,nullptr,0)==0,"spatial undo");
+    check(render(spline)==switched,"undo removes overlay without stale pixels");
+    check(Java_com_infinipaint_demo_NativeBridge_command(nullptr,nullptr,2,nullptr,0)==0,"spatial redo");
+    check(render(spline)==appended&&hostSpatialStats()[7]==beforeAppend[7],"redo restores exact overlay order without rebuilding base");
+    // Reopen-like same IDs and full root reset above, clear below.
+    Java_com_infinipaint_demo_NativeBridge_suspend(nullptr,nullptr,false);
+    clear();check(render(spline).front()==background,"spatial clear leaves no stale pixels");
+    std::printf("PASS spatial RGBA fixture: %u extra exact comparisons, multi-page crossings, alpha, zoom, motion, context, disk fault, epoch, overlay undo/redo\n",planComparisons-startComparisons);
+}
+#endif
 } // namespace
 
 #ifdef IP_M04_HOST
@@ -516,6 +614,7 @@ int main() {
     }
     Java_com_infinipaint_demo_NativeBridge_suspend(nullptr,nullptr,false);
     std::puts("PASS: v1 codec and reconstruction vertex bytes + 4-mode RGBA parity");
+    spatialPixelOracle(pbuffer,background);
 #endif
     clear();
     check(render(composite) == blank, "JNI clear left ink in the framebuffer");

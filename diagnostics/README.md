@@ -48,3 +48,7 @@ The Android diagnostic test is not the production InfinitePaper/InfiniPaint engi
 ## M04.3-C host scheduling checks
 
 `sh diagnostics/run_renderer_smoke.sh` runs mock bridge/ownership, planner, live prefix, scheduler and Java queue/pipeline regressions (set JAVA_HOME to host JDK 17+). `IP_PLAN_TEST=1 sh diagnostics/run_m02.sh pixels` enables exact resident/planner comparisons in both GLES2 coverage modes. NDK_HEADERS and Mesa setup remain as above. These tests are separate from Android Gradle unit tests.
+
+## M04 production spatial access
+
+Run `sh diagnostics/run_m04_spatial.sh stress` on a POSIX C++20 host. Default runs the ordered oracle, fault/overflow suite and fixed-visible-count scale test; stress adds 12 seeds. For production bridge and pixel integration use the existing renderer smoke and M02 pixel recipes with `IP_PLAN_TEST=1` for indexed-vs-exact comparisons. See [scope and telemetry](../reports/M04_SPATIAL_ACCESS.md).

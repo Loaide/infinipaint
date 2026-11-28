@@ -19,6 +19,7 @@
 #include <vector>
 #include <thread>
 #include "tablet/frame_scheduler.hpp"
+#include "tablet/spatial_delta.hpp"
 
 #include "input/input_processor.hpp"
 #include "document/document.hpp"
@@ -72,12 +73,13 @@ namespace {
     std::atomic<uint64_t> historyCharge{0},queueHigh{0},canonicalCharge{0};
     std::atomic<uint64_t> physicalSlice{0},sceneOwners{0},candidateNodes{0},liveVboCharge{0};
     std::atomic<uint64_t> livePublicationBytes{0},livePublicationHigh{0},publicationRetries{0},plannerFixedCharge{0};
+    tablet::spatial::Stats spatialStats;
     bool admits(uint64_t activeMesh,uint64_t samples,uint64_t decoding=0,uint64_t extraNodes=0) {
         const auto slice=physicalSlice.load(std::memory_order_relaxed);
         if(!slice) return true; // host renderer fixtures have no Android process
         return document::WorkingSet::forSlice(slice).admits(document::Ink::liveBytes.load(),
                 retainedMeshes.load(),sceneOwners.load()+candidateNodes.load()+4+extraNodes,
-                activeMesh,samples,decoding+livePublicationBytes.load()+plannerFixedCharge.load(),liveVboCharge.load());
+                activeMesh,samples,decoding+livePublicationBytes.load()+plannerFixedCharge.load()+spatialStats.dynamicBytes.load(),liveVboCharge.load());
     }
     // Count allocations, not map sizes sampled at publication boundaries. swap
     // and node-handle merge transfer ownership without changing this ledger.
@@ -262,6 +264,7 @@ namespace {
         std::shared_ptr<const FinishedTrace> shape;
         size_t bytes=0;
         std::array<float,4> rgba{};
+        Key prev=0; // reciprocal canonical link for sparse delta validation
     };
     uint64_t workingBytes(const Trace& t) {
         return t.input.raw_samples().capacity()*sizeof(input::RawInputPoint)+
@@ -348,20 +351,23 @@ namespace {
     int width = 1;
     int height = 1;
 
-    // Transitional v1 visibility planner. The GL owner transfers already
-    // applied immutable deltas; the worker merges node handles (no full scene
-    // copy), retires CPU references, and prepares exact ordered visible IDs.
-    // GL can always render its complete resident v1 scene directly if the
-    // plan is absent/stale. Spatial streaming will replace this linear query.
+    // First production spatial access slice. The worker owns ephemeral packed
+    // pages, a bounded edit BVH, and sparse paint ranks. The resident scene
+    // remains the validated authority and exact fallback until canonical
+    // streaming and geometry residency are integrated.
     struct PlanStamp {
         uint64_t epoch=0;
         document::Revision revision=0;
         Key head=0;
         tablet::ViewIntent view;
-        bool same(const PlanStamp& other) const noexcept {
+        bool sameScene(const PlanStamp& other) const noexcept {
             return epoch==other.epoch && revision==other.revision && head==other.head &&
-                view.sequence==other.view.sequence && view.mappingGeneration==other.view.mappingGeneration &&
-                view.width==other.view.width && view.height==other.view.height;
+                view.mappingGeneration==other.view.mappingGeneration && view.width==other.view.width && view.height==other.view.height;
+        }
+        bool same(const PlanStamp& other) const noexcept {return sameScene(other)&&view.sequence==other.view.sequence;}
+        tablet::spatial::Window window() const noexcept {
+            const double x=(float)view.x,y=(float)view.y,z=(float)view.zoom;
+            return {x,y,x+view.width/z,y+view.height/z};
         }
     };
     struct SceneDelta {
@@ -373,15 +379,25 @@ namespace {
     constexpr size_t visiblePlanLimit=65536;
     struct VisiblePlan {
         PlanStamp stamp;
+        tablet::spatial::Window envelope{};
         std::array<Key,visiblePlanLimit> ids;
         size_t count=0;
-        bool valid=false;
+        bool valid=false,indexed=false;
     };
     struct FramePlanner {
         tablet::SpscSlot<SceneDelta> deltas;
         tablet::SpscRing<LiveView,8> retiredLive;
         tablet::LatestTriple<VisiblePlan> plans;
         tablet::WakeGate wake;
+        tablet::spatial::Index index{spatialStats,[](size_t n){return admits(0,0,n);}};
+        std::mutex cacheDirMutex;
+#ifdef __ANDROID__
+        std::array<char,4096> cacheDir{};
+#else
+        std::array<char,4096> cacheDir{'/','t','m','p','\0'};
+#endif
+        std::atomic<uint64_t> envelopeReuse{0},indexedPlans{0},linearPlans{0},linearTests{0};
+        std::atomic<uint64_t> indexedFrames{0},linearFrames{0},envelopeFrames{0},planIdsTested{0},residentFallbackRows{0};
         std::atomic<bool> enabled{false},stopping{false};
         bool attempted=false; // GL owner, one startup attempt per process
         std::thread worker;
@@ -389,8 +405,14 @@ namespace {
 #ifndef __ANDROID__
         std::atomic<bool> testPark{false},testParked{false};
         bool testForceFallback=false; // GL test owner only
+        std::atomic<int> testSpatialFault{0};
         std::binary_semaphore testRelease{0};
 #endif
+        void configureCache(const char* path) noexcept {
+            if(!path)return;
+            std::lock_guard lock(cacheDirMutex);
+            if(std::strlen(path)<cacheDir.size())std::memcpy(cacheDir.data(),path,std::strlen(path)+1);
+        }
         void start() noexcept {
             if(attempted) return;
             attempted=true;
@@ -428,8 +450,27 @@ namespace {
         void drainRetired() noexcept {
             for(size_t i=0;i<8;++i) {auto old=retiredLive.pop();if(!old)break;old.reset();++retired;}
         }
-        bool obsolete(const PlanStamp& stamp) const noexcept {
-            return stopping.load() || deltas.hasData() || desiredView.latch().sequence!=stamp.view.sequence;
+        bool obsolete(const PlanStamp& stamp,tablet::spatial::Window envelope) const noexcept {
+            const auto view=desiredView.latch();
+            PlanStamp wanted{stamp.epoch,stamp.revision,stamp.head,view};
+            return stopping.load() || deltas.hasData() || !stamp.sameScene(wanted) || !envelope.contains(wanted.window());
+        }
+        static tablet::spatial::Box boxOf(const Published& p) noexcept {
+            return {p.shape->minX,p.shape->minY,p.shape->maxX,p.shape->maxY};
+        }
+        void rebuildIndex(const Scene& scene,Key head) noexcept {
+            std::array<char,4096> path{};
+            {std::lock_guard lock(cacheDirMutex);path=cacheDir;}
+            auto stop=[&]{drainRetired();return stopping.load()||deltas.hasData();};
+            index.rebuild(path.data(),scene.size(),[&](auto emit){
+                size_t visited=0;Key prev=0,id=head;
+                while(id) {
+                    auto it=scene.find(id);
+                    if(it==scene.end()||!it->second.shape||it->second.prev!=prev||++visited>scene.size())return false;
+                    emit(id,boxOf(it->second));prev=id;id=it->second.next;
+                }
+                return visited==scene.size();
+            },stop);
         }
         void run() noexcept {
             Scene scene; // sole planner owner, existing SceneAllocator ledger
@@ -439,7 +480,8 @@ namespace {
                 delta.epoch=slot.epoch;delta.revision=slot.revision;delta.head=slot.head;
             });};
             PlanStamp stamp,last;
-            bool haveLast=false;
+            bool haveLast=false,lastValid=false;
+            tablet::spatial::Window lastEnvelope{};
             while(true) {
                 wake.wait();
                 if(stopping.load()) break;
@@ -448,44 +490,73 @@ namespace {
                 if(stopping.load()) break;
 #endif
                 if(takeDelta()) {
-                    if(stamp.epoch!=delta.epoch) scene.clear();
+                    const bool sameEpoch=stamp.epoch==delta.epoch;
+                    const bool incremented=sameEpoch&&tablet::spatial::updateOrdered(index,scene,delta.rows,stamp.head,delta.head,boxOf);
+                    if(!sameEpoch) scene.clear();
                     for(auto it=delta.rows.begin();it!=delta.rows.end();) {
                         scene.erase(it->first);
                         if(!it->second.shape) it=delta.rows.erase(it);else ++it;
                     }
                     scene.merge(delta.rows);
                     stamp.epoch=delta.epoch;stamp.revision=delta.revision;stamp.head=delta.head;
+                    if(!incremented)rebuildIndex(scene,stamp.head);
+                    // Context rebuild can resend the same revision; never
+                    // retain a plan from before consuming a delta batch.
+                    haveLast=false;
                 }
                 drainRetired();
-                stamp.view=desiredView.latch();
-                if(haveLast && stamp.same(last)) continue;
-                auto& plan=plans.write();plan.stamp=stamp;plan.count=0;plan.valid=false;
-                const double minX=(float)stamp.view.x,minY=(float)stamp.view.y;
-                const double maxX=minX+stamp.view.width/(double)(float)stamp.view.zoom;
-                const double maxY=minY+stamp.view.height/(double)(float)stamp.view.zoom;
-                size_t visited=0;Key id=stamp.head;bool bad=false,aborted=false;
-                while(id) {
-                    if((visited&127)==0) {
-                        drainRetired();
-                        if(obsolete(stamp)) {aborted=true;break;}
-                    }
-                    auto it=scene.find(id);
-                    if(it==scene.end() || ++visited>scene.size() || !it->second.shape) {bad=true;break;}
-                    const auto& b=*it->second.shape;
-                    if(!(b.maxX<minX || b.minX>maxX || b.maxY<minY || b.minY>maxY)) {
-                        if(plan.count==plan.ids.size()) {bad=true;break;}
-                        plan.ids[plan.count++]=id;
-                    }
-                    id=it->second.next;
+#ifndef __ANDROID__
+                if(const int fault=testSpatialFault.exchange(0)) {
+                    if(index.ready()&&index.hasBase()) {if(fault==1)index.corruptSpatialRoot();else if(fault==2)index.truncatePages();else index.corruptOrderRoot();}
+                    haveLast=false;
                 }
-                if(aborted || obsolete(stamp)) {++cancelled;continue;}
-                plan.valid=!bad && visited==scene.size();
-                if(!plan.valid) ++invalid;
-                plans.publish();last=stamp;haveLast=true;++built;
+#endif
+                stamp.view=desiredView.latch();
+                const auto exact=stamp.window();
+                if(haveLast&&stamp.same(last))continue;
+                if(haveLast&&lastValid&&stamp.sameScene(last)&&lastEnvelope.contains(exact)) {last.view=stamp.view;++envelopeReuse;continue;}
+                auto& plan=plans.write();plan.stamp=stamp;plan.count=0;plan.valid=false;plan.indexed=false;
+                // Prefetch a conservative 20% margin on each side. This is
+                // an ID superset, not a tile image. GL rechecks exact bounds
+                // in the actual viewport and composites whole strokes once.
+                const double dx=(exact.maxX-exact.minX)*.20,dy=(exact.maxY-exact.minY)*.20;
+                plan.envelope={exact.minX-dx,exact.minY-dy,exact.maxX+dx,exact.maxY+dy};
+                auto stop=[&]{drainRetired();return obsolete(stamp,plan.envelope);};
+                using Result=tablet::spatial::Index::Result;
+                auto result=index.query(plan.envelope,plan.ids,plan.count,stop);
+                if(result==Result::Overflow) {
+                    plan.envelope=exact;result=index.query(exact,plan.ids,plan.count,stop);
+                }
+                if(result==Result::Cancelled||stop()){++cancelled;continue;}
+                if(result==Result::Ok) {plan.valid=true;plan.indexed=true;}
+                else {
+                    // Never truncate visible IDs or reuse incomplete pages.
+                    // The resident reference provides exact pixels on any
+                    // cache/disk/admission fault. It remains a scalability
+                    // limitation, and is explicitly counted.
+                    plan.envelope=exact;plan.count=0;
+                    size_t visited=0;Key id=stamp.head,prev=0;bool bad=false,aborted=false;
+                    while(id) {
+                        if((visited&127)==0&&stop()){aborted=true;break;}
+                        auto it=scene.find(id);
+                        if(it==scene.end()||++visited>scene.size()||!it->second.shape||it->second.prev!=prev){bad=true;break;}
+                        if(exact.hits(boxOf(it->second))) {
+                            if(plan.count==plan.ids.size()){bad=true;break;}
+                            plan.ids[plan.count++]=id;
+                        }
+                        prev=id;id=it->second.next;
+                    }
+                    linearTests+=visited;
+                    if(aborted||stop()){++cancelled;continue;}
+                    plan.valid=!bad&&visited==scene.size();
+                }
+                if(stop()){++cancelled;continue;}
+                if(!plan.valid)++invalid;else if(plan.indexed)++indexedPlans;else ++linearPlans;
+                last=stamp;lastEnvelope=plan.envelope;lastValid=plan.valid;haveLast=true;plans.publish();++built;
             }
             // All CPU references in this lane are released on its own thread.
             if(takeDelta()) delta.rows.clear();
-            drainRetired();
+            index.reset();drainRetired();
         }
         const VisiblePlan* latch(const RenderLatch& frame,int w,int h) noexcept {
             if(!enabled.load(std::memory_order_acquire)) return nullptr;
@@ -494,7 +565,7 @@ namespace {
             if(testForceFallback) {++fallbacks;return nullptr;}
 #endif
             PlanStamp wanted{frame.epoch,frame.revision,frame.head,frame.view};
-            if(!plan.valid || !plan.stamp.same(wanted) || frame.view.width!=w || frame.view.height!=h) {
+            if(!plan.valid || !plan.stamp.sameScene(wanted) || !plan.envelope.contains(wanted.window()) || frame.view.width!=w || frame.view.height!=h) {
                 ++fallbacks;return nullptr;
             }
             return &plan;
@@ -1182,7 +1253,7 @@ struct SceneSink final : document::Observer {
                 auto status=saves.prepare(doc,touched);
                 if(status!=document::Status::Ok) return status;
             }
-            auto& row=appendNodes.at(id);row={0,doc.revision()+1,appended,appendedBytes,doc.find(id)->value.rgba()};
+            auto& row=appendNodes.at(id);row={0,doc.revision()+1,appended,appendedBytes,doc.find(id)->value.rgba(),prev};
             appendPatch.at(id)=row;
             if(prev) {
                 auto& predecessor=finished.at(prev);predecessor.next=id;appendPatch.at(prev)=predecessor;
@@ -1218,7 +1289,7 @@ struct SceneSink final : document::Observer {
                 if(dst.bytes>sceneLimit-projected) {valid=false;return;}
                 projected+=dst.bytes;
             } else if(!dst.shape) {dst=finished.at(id);dst.next=r->next;}
-            dst.rgba=r->value.rgba();
+            dst.rgba=r->value.rgba();dst.prev=r->prev;
         };
         // Subjects first: adjacent new subjects may not yet have a projection.
         for(auto e:touched) if(e.geometry) include(e.id,true);
@@ -2148,14 +2219,23 @@ Java_com_infinipaint_demo_NativeBridge_render(
     if(plan && std::all_of(plan->ids.begin(),plan->ids.begin()+plan->count,
                           [](Key id){return gpuFinished.contains(id);})) {
         ++planner.hits;
-        for(size_t i=0;i<plan->count;++i) drawCompleted(gpuFinished.at(plan->ids[i]));
+        if(plan->indexed)++planner.indexedFrames;else ++planner.linearFrames;
+        if(plan->stamp.view.sequence!=frame.view.sequence)++planner.envelopeFrames;
+        planner.planIdsTested+=plan->count;
+        for(size_t i=0;i<plan->count;++i) {
+            auto& cached=gpuFinished.at(plan->ids[i]);
+            if(cached.maxX<viewMinX || cached.minX>viewMaxX || cached.maxY<viewMinY || cached.minY>viewMaxY)continue;
+            drawCompleted(cached);
+        }
     } else {
         if(plan) ++planner.fallbacks;
+        uint64_t tested=0;
         for(auto* node=frameHead?&gpuFinished.at(frameHead):nullptr;node;node=node->following) {
-            auto& cached=*node;
+            ++tested;auto& cached=*node;
             if(cached.maxX<viewMinX || cached.minX>viewMaxX || cached.maxY<viewMinY || cached.minY>viewMaxY) continue;
             drawCompleted(cached);
         }
+        planner.residentFallbackRows+=tested;
     }
 
     // Retire live buffers after a stroke ends/cancels. GL thread owns deletion.
@@ -2278,6 +2358,29 @@ Java_com_infinipaint_demo_NativeBridge_render(
     }
 }
 
+JNIEXPORT void JNICALL Java_com_infinipaint_demo_NativeBridge_configureSpatialCache(JNIEnv* env,jclass,jstring path) {
+    if(!path)return;
+    const char* chars=env->GetStringUTFChars(path,nullptr);
+    if(chars){planner.configureCache(chars);env->ReleaseStringUTFChars(path,chars);}
+}
+JNIEXPORT jlongArray JNICALL Java_com_infinipaint_demo_NativeBridge_spatialCounters(JNIEnv* env,jclass) {
+    const auto stats=spatialStats.snapshot();std::array<jlong,stats.size()+9> a{};
+    std::copy(stats.begin(),stats.end(),a.begin());
+    a[stats.size()]=planner.envelopeReuse.load();a[stats.size()+1]=planner.indexedPlans.load();
+    a[stats.size()+2]=planner.linearPlans.load();a[stats.size()+3]=planner.linearTests.load();
+    a[stats.size()+4]=planner.indexedFrames.load();a[stats.size()+5]=planner.linearFrames.load();
+    a[stats.size()+6]=planner.envelopeFrames.load();a[stats.size()+7]=planner.planIdsTested.load();a[stats.size()+8]=planner.residentFallbackRows.load();
+    auto arr=env->NewLongArray(a.size());if(arr)env->SetLongArrayRegion(arr,0,a.size(),a.data());return arr;
+}
+JNIEXPORT jlongArray JNICALL Java_com_infinipaint_demo_NativeBridge_spatialLatency(JNIEnv* env,jclass) {
+    // Edges + histogram counts + exact max; cumulative successes only.
+    constexpr auto edges=tablet::spatial::Stats::latencyEdges;
+    std::array<jlong,edges.size()*2+2> a{};
+    for(size_t i=0;i<edges.size();++i)a[i]=jlong(edges[i]);
+    for(size_t i=0;i<spatialStats.latency.size();++i)a[edges.size()+i]=jlong(spatialStats.latency[i].load());
+    a.back()=jlong(spatialStats.successfulMaxNs.load());
+    auto arr=env->NewLongArray(a.size());if(arr)env->SetLongArrayRegion(arr,0,a.size(),a.data());return arr;
+}
 JNIEXPORT jlongArray JNICALL Java_com_infinipaint_demo_NativeBridge_plannerCounters(JNIEnv* env,jclass) {
     std::array<jlong,9> a{jlong(planner.enabled.load()),jlong(planner.hits.load()),jlong(planner.fallbacks.load()),
         jlong(planner.built.load()),jlong(planner.cancelled.load()),jlong(planner.invalid.load()),
@@ -2303,6 +2406,9 @@ uint64_t hostLivePublicationBytes(){return livePublicationBytes.load();}
 void hostStartPlanner(){planner.start();}
 void hostForcePlannerFallback(bool force){planner.testForceFallback=force;}
 std::array<uint64_t,8> hostPlannerStats(){return {planner.enabled.load(),planner.hits.load(),planner.fallbacks.load(),planner.built.load(),planner.cancelled.load(),planner.invalid.load(),planner.backpressure.load(),planner.retired.load()};}
+std::array<uint64_t,39> hostSpatialStats(){return spatialStats.snapshot();}
+std::array<uint64_t,5> hostSpatialFrameStats(){return {planner.indexedFrames.load(),planner.linearFrames.load(),planner.envelopeFrames.load(),planner.planIdsTested.load(),planner.residentFallbackRows.load()};}
+void hostSpatialFault(int fault){planner.testSpatialFault.store(fault);planner.request();}
 void hostParkPlanner(){planner.testPark.store(true);planner.request();}
 bool hostPlannerParked(){return planner.testParked.load();}
 void hostResumePlanner(){planner.testPark.store(false);planner.testRelease.release();}
@@ -2329,7 +2435,7 @@ bool stage(std::unique_ptr<document::Document> candidate,size_t meshBudget) {
             if(mesh->capacity()>meshBudget/sizeof(Vertex)) return false;
             meshBudget-=mesh->capacity()*sizeof(Vertex);
         }
-        replacement.emplace(id,Published{r.next,r.geometry,std::move(shape),bytes,r.value.rgba()});
+        replacement.emplace(id,Published{r.next,r.geometry,std::move(shape),bytes,r.value.rgba(),r.prev});
         id=r.next;
     }
     {

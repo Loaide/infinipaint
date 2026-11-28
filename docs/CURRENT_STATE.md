@@ -1,3 +1,7 @@
+## Current M04 increment — spatial access (functionally verified)
+
+Baseline `107b6fb6c1de2535afe8eebda3d8f5d64a3b73b6` includes functionally verified M04.3-C. [First production spatial access slice](../reports/M04_SPATIAL_ACCESS.md) implements ephemeral packed pages, bounded BVH overlay and sparse paint-rank lookup in the existing planner. Host tests, Android build and 12/12 tablet checks passed. Canonical/mesh streaming, counted sequence tree, certified LOD, residency and Vulkan cutover remain open.
+
 # Current project state — M03 accepted
 
 - M00, M00.5, M01 and M02: accepted.

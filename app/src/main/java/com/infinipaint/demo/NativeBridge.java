@@ -26,6 +26,9 @@ public final class NativeBridge {
  public static native void render(int mode);
  static native boolean needsPublicationRetry();
  static native long[] plannerCounters();
+ static native void configureSpatialCache(String path);
+ static native long[] spatialCounters();
+ static native long[] spatialLatency();
 
 
 }

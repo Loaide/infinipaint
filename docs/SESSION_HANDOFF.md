@@ -1,3 +1,7 @@
+# Current handoff — M04 production spatial access
+
+Inspected owner archive `107b6fb6c1de2535afe8eebda3d8f5d64a3b73b6`, branch `feature/m04-scalable-renderer`. [Scope, telemetry and acceptance](../reports/M04_SPATIAL_ACCESS.md). New derived index and rank pages are integrated in the production resident planner; strict host tests passed. Android build and tablet acceptance passed. Next: counted paint ordering and canonical streaming. No backend rerun. Do not treat whole-stroke page lookup as completed canonical/geometry streaming or change approved architecture. Previous M04.3 handoff follows.
+
 # M04.3 — backend selected; production execution authorized
 
 `feature/m04-scalable-renderer`, inspected `2af1a8fc4a5df3e777027d4a6c946f00515a159e`. Owner selected native Vulkan with compact instancing for the reference tablet. Preserve GLES2/v1 and ADR-013. See [selection and fidelity requirement](../reports/M04_BACKEND_GATE.md). Next: isolated publication and editing, not another diagnostic campaign. No device authorization.

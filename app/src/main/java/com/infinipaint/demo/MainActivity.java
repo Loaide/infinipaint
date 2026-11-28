@@ -139,6 +139,8 @@ public final class MainActivity extends Activity implements EditorStore.Listener
         out.println(prefix+"ink_lane [queued,highWater,rejected] "+java.util.Arrays.toString(ink.counters()));
         out.println(prefix+"ink_admission [outstanding,highWater,rejectedStrokes,blocked] "+java.util.Arrays.toString(ink.admissionCounters()));
         out.println(prefix+"planner [enabled,hits,fallbacks,built,cancelled,invalid,backpressure,retiredLive,fixedCharge] "+java.util.Arrays.toString(NativeBridge.plannerCounters()));
+        out.println(prefix+"spatial [ready,baseRows,overlayRows,diskBytes,diskPeak,dynamicBytes,dynamicPeak,builds,incremental,queries,cancelled,fallbacks,ioFaults,invalid,capacity,reads,cacheHits,spatialPages,boundsTests,overlayNodes,shadowed,candidates,rankLookups,buildNs,buildMaxNs,spatialNs,spatialMaxNs,orderNs,orderMaxNs,queryNs,queryMaxNs,compactions,buildAttempts,queryAttempts,rankCacheHits,overlayActive,successfulQueryNs,successfulSpatialNs,successfulOrderNs,envelopeReuse,indexedPlans,linearPlans,linearTests,indexedFrames,linearFrames,envelopeFrames,planIdsTested,residentFallbackRows] "+java.util.Arrays.toString(NativeBridge.spatialCounters()));
+        out.println(prefix+"spatial_latency [16 upper_us,17 success_bucket_counts,max_ns] "+java.util.Arrays.toString(NativeBridge.spatialLatency()));
         FrameTelemetry.Snapshot s = frames.snapshot(mark);
         out.printf(Locale.US, "%sIP_FRAMES camera=%d stylus=%d other=%d callbacks=%d withoutPending=%d%n",
                 prefix, s.camera, s.stylus, s.other, s.callbacks, s.withoutPending);
@@ -602,6 +604,8 @@ public final class MainActivity extends Activity implements EditorStore.Listener
             smoothingPreset = Math.max(0, Math.min(2, state.getInt("smoothingPreset", 1)));
             restoreCamera(state);
         }
+        java.io.File spatialCache=getCacheDir();
+        if(spatialCache!=null)NativeBridge.configureSpatialCache(spatialCache.getAbsolutePath());
         inputAudit = new InputAuditRecorder(this);
 
         getWindow().addFlags(

@@ -1,3 +1,9 @@
+# M04 production spatial access — first increment, functionally verified
+
+[Implementation, rigorous tests and completed tablet acceptance](M04_SPATIAL_ACCESS.md). The prior resident renderer remains exact fallback; canonical/geometry streaming and full counted paint-order tree remain open. No Vulkan cutover.
+
+---
+
 # M04.3-C execution scheduling — functionally verified
 
 [Scope, host tests and tablet verification](M04_3_EXECUTION_SCHEDULING.md). No production Vulkan cutover or full scalability acceptance.
