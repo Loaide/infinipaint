@@ -1,3 +1,7 @@
+## M04 direct span cache and local compaction candidate
+
+`document/source_digest.hpp`: fixed-state source/mesh identity. `tablet/span_store.hpp`: explicit checked span packets and ordinal/spatial page reads; `tablet/span_cache.hpp`: bounded dirty/durable disposable cache, promotion after acknowledgement. `native_bridge.cpp::FramePlanner::refineSpans`: worker demand and compatible exact vertex ranges. `tablet/spatial_pages.hpp`: local overlay compaction and bounded write-back. `MainActivity.dump`: span and compaction telemetry. `diagnostics/run_m04_span_store.sh`, `run_m04_spatial.sh stress`, `egl_ink_test.cpp`: disk/fault/visibility/refined RGBA oracles. [Report and limitations](../reports/M04_SPAN_STREAMING.md).
+
 ## M04 canonical span streaming — first slice
 
 `stroke/spline.*`: rolling exact v1 spline. `document/canonical_stream.hpp`: fixed-state replay; `document/canonical_range.hpp`: bounded CPS1 interval packets and conservative v1 bounds. `native_bridge.cpp::reconstructV1`: production mesh reconstruction. `storage/DocumentDatabase.java`: shared record validation and targeted durable read; `storage/StorePort.java` / `tablet/store_jni.cpp`: bounded native lease. `MainActivity.dump`: canonical telemetry. `diagnostics/run_m04_canonical_stream.sh stress` and `storage/CanonicalRangeTest.java`: host and Android verification. [Report](../reports/M04_CANONICAL_STREAM.md). Range reader not yet connected to viewport planner.

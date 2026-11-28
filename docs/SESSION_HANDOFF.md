@@ -1,3 +1,7 @@
+# Current handoff — M04 span access and localized compaction
+
+Inspected owner archive `9db632b4662da8113273d95eb0abca6d901d9156`, `feature/m04-scalable-renderer`; [candidate report](../reports/M04_SPAN_STREAMING.md), [host logs](../reports/M04_SPAN_STREAMING_HOST_RESULTS.txt). Android build/tablet acceptance pending. Retain exact whole-stroke fallback. Do not treat lazy per-record span cache and resident cuts as complete Package 1. Global durable paired span roots, independent nonresident canonical retrieval and affected-range maintenance of global spans remain open. Preserve existing mesh limits and approved later LOD/residency/Vulkan gates.
+
 # Current handoff — M04 canonical span streaming, first slice
 
 Inspected `4b0710b3e9f099d86aa1ce6973f4964f7a3a3dc7` on owner branch `feature/m04-scalable-renderer`. [Scope, evidence and acceptance](../reports/M04_CANONICAL_STREAM.md). Rolling v1 production replay and durable single-record ordinal-range reader implemented; Host tests, Android instrumentation and tablet acceptance passed. Then integrate persistent span bounds/checkpoints and actual viewport demand with revision-compatible roots. No new GPU backend work.

@@ -20,6 +20,7 @@
 #include <thread>
 #include "tablet/frame_scheduler.hpp"
 #include "tablet/spatial_delta.hpp"
+#include "tablet/span_cache.hpp"
 
 #include "input/input_processor.hpp"
 #include "document/document.hpp"
@@ -75,6 +76,7 @@ namespace {
     std::atomic<uint64_t> physicalSlice{0},sceneOwners{0},candidateNodes{0},liveVboCharge{0};
     std::atomic<uint64_t> livePublicationBytes{0},livePublicationHigh{0},publicationRetries{0},plannerFixedCharge{0};
     tablet::spatial::Stats spatialStats;
+    tablet::spans::Stats spanStats;
     // Restore/edit worker reconstruction only, not active ink callbacks.
     struct ReplayCounters {
         std::atomic<uint64_t> attempts{0},success{0},failed{0},samples{0},spans{0},chords{0},ns{0},maxNs{0},peakMesh{0};
@@ -261,6 +263,7 @@ namespace {
         std::shared_ptr<const Mesh> spline;
         float minX = 0, minY = 0, maxX = 0, maxY = 0;
         uint64_t liveId=0;
+        double dx=0,dy=0;
     };
     using Key=document::Id;
     struct Published {
@@ -291,6 +294,7 @@ namespace {
         Key head=0;
         uint64_t epoch=0, liveSequence=0;
         document::Revision revision=0;
+        document::Uuid doc{};
     };
     RenderLatch renderLatch; // GL-owned; keep prior coherent latch on contention
     bool publicationRetry=false; // GL-owned, consumed by onDrawFrame
@@ -301,6 +305,21 @@ namespace {
     void retireLivePublication() {
         LiveView retired;
         {std::lock_guard guard(publicationMutex); std::swap(retired,publishedLive);++livePublicationSequence;}
+    }
+    // Durable watermark is distinct from the visible root. Only an acknowledged
+    // SQLite commit (or fully validated activation) may advance it.
+    std::atomic<uint64_t> durableEpoch{0};
+    std::atomic<document::Revision> durableRevision{0};
+    document::Uuid sceneDocument{};
+    void setDurable(uint64_t epoch,document::Revision revision) noexcept {
+        durableEpoch.store(0,std::memory_order_release);
+        durableRevision.store(revision,std::memory_order_relaxed);
+        durableEpoch.store(epoch,std::memory_order_release);
+    }
+    document::Revision durableFor(uint64_t epoch) noexcept {
+        if(durableEpoch.load(std::memory_order_acquire)!=epoch)return 0;
+        auto r=durableRevision.load(std::memory_order_acquire);
+        return durableEpoch.load(std::memory_order_acquire)==epoch?r:0;
     }
     document::Revision sceneRevision=0; // belongs to the published head + patch, not the save worker
     size_t sceneBytes=0,sceneLimit=SIZE_MAX,canonicalLimit=SIZE_MAX;
@@ -377,22 +396,45 @@ namespace {
     };
     struct SceneDelta {
         Scene rows;
+        document::Uuid doc{};
         uint64_t epoch=0;
         document::Revision revision=0;
         Key head=0;
     };
     constexpr size_t visiblePlanLimit=65536;
+    constexpr size_t spanCutLimit=64;
+    struct SpanCut {
+        size_t index=0;document::Revision geometry=0;
+        tablet::spans::Range vertices{};
+    };
     struct VisiblePlan {
         PlanStamp stamp;
         tablet::spatial::Window envelope{};
         std::array<Key,visiblePlanLimit> ids;
         size_t count=0;
+        std::array<SpanCut,spanCutLimit> cuts{};size_t cutCount=0;
         bool valid=false,indexed=false;
     };
     struct FramePlanner {
         tablet::SpscSlot<SceneDelta> deltas;
         tablet::SpscRing<LiveView,8> retiredLive;
         tablet::LatestTriple<VisiblePlan> plans;
+        // Worker scratch is charged with the fixed planner reservation. A
+        // coarse complete plan is published before any cold span I/O.
+        VisiblePlan workingPlan;
+        tablet::spans::Cache spanCache{spanStats};
+        struct SpanMemo {
+            std::weak_ptr<const FinishedTrace> shape;
+            tablet::spans::Key key{};uint64_t epoch=0;bool valid=false,disabled=false;
+        };
+        std::array<SpanMemo,256> spanMemos{};
+        bool spanInitAttempted=false;
+        void publishPlan(const VisiblePlan& plan) noexcept {
+            auto& out=plans.write();out.stamp=plan.stamp;out.envelope=plan.envelope;
+            out.count=plan.count;out.valid=plan.valid;out.indexed=plan.indexed;out.cutCount=plan.cutCount;
+            std::copy_n(plan.ids.begin(),plan.count,out.ids.begin());std::copy_n(plan.cuts.begin(),plan.cutCount,out.cuts.begin());
+            plans.publish();++built;
+        }
         tablet::WakeGate wake;
         tablet::spatial::Index index{spatialStats,[](size_t n){return admits(0,0,n);}};
         std::mutex cacheDirMutex;
@@ -423,8 +465,8 @@ namespace {
             attempted=true;
             // Fixed triple buffer/ring charge plus existing map-node charges.
             // If the reserved plan storage cannot fit, retain exact v1 path.
-            if(!admits(0,0,sizeof(FramePlanner))) return;
-            plannerFixedCharge.store(sizeof(FramePlanner));
+            if(!admits(0,0,sizeof(FramePlanner)+tablet::spans::scratchCeiling)) return;
+            plannerFixedCharge.store(sizeof(FramePlanner)+tablet::spans::scratchCeiling);
             try {worker=std::thread([this]{run();});enabled.store(true,std::memory_order_release);}
             catch(...) {plannerFixedCharge.store(0);}
         }
@@ -444,7 +486,7 @@ namespace {
             // Swap with the preconstructed slot; no map allocation here.
             if(!deltas.push([&](SceneDelta& delta) noexcept {
                 assert(delta.rows.empty());delta.rows.swap(rows);
-                delta.epoch=frame.epoch;delta.revision=frame.revision;delta.head=frame.head;
+                delta.epoch=frame.epoch;delta.revision=frame.revision;delta.head=frame.head;delta.doc=frame.doc;
             })) std::terminate();
             wake.signal();
         }
@@ -477,14 +519,102 @@ namespace {
                 return visited==scene.size();
             },stop);
         }
+        // Match the exact resident v1 descriptors, including translation,
+        // endpoint ordering and all six vertices. No mesh reconstruction on GL.
+        static bool matchChord(const FinishedTrace& shape,uint32_t first,float ax,float ay,float bx,float by,float a,float b,document::SpanBounds& bounds) noexcept {
+            if(first>shape.spline->size()||shape.spline->size()-first<6)return false;
+            float dx=bx-ax,dy=by-ay,len=std::hypot(dx,dy);
+            if(len<.0001f){dx=1;dy=0;len=0;}else{dx/=len;dy/=len;}
+            if(shape.dx!=0||shape.dy!=0){ax=float(double(ax)+shape.dx);ay=float(double(ay)+shape.dy);}
+            static constexpr std::array<std::array<float,2>,6> corners{{{0,-1},{1,-1},{1,1},{0,-1},{1,1},{0,1}}};
+            static_assert(sizeof(Vertex)==9*sizeof(float));
+            for(size_t j=0;j<6;++j){const Vertex v{ax,ay,corners[j][0],corners[j][1],len,a,b<0?a:b,dx,dy};
+                if(std::memcmp(&v,&(*shape.spline)[first+j],sizeof(v)))return false;}
+            // Enclose the entire expanded quad (not just the analytic disc)
+            // at the minimum supported zoom, plus generous floating-point
+            // and screen-transform margin. Outside this v1 domain use exact
+            // whole-stroke submission. M05 owns wider precision guarantees.
+            constexpr double domain=16777216.;
+            const double magnitude=std::max({std::abs(double(ax)),std::abs(double(ay)),double(len),double(a),double(b),1.});
+            if(!std::isfinite(magnitude)||magnitude>domain)return false;
+            const double pad=2*(std::max(double(a),double(b))+10.)+32.+64*std::numeric_limits<float>::epsilon()*magnitude;
+            return bounds.include(ax,ay,double(ax)+double(dx)*len,double(ay)+double(dy)*len,pad);
+        }
+        template<class Stop> bool identifySpan(SpanMemo& memo,const Published& row,const document::Uuid& doc,Key id,uint64_t epoch,Stop& stop) {
+            using namespace tablet::spans;
+            document::wire::Header header{};const auto& shape=*row.shape;const auto& ink=*shape.record;
+            if(!document::wire::header(ink.brush,shape.dx,shape.dy,header))return false;
+            document::SourceDigest source,mesh;source.update(header);
+            std::array<uint8_t,64*document::wire::sampleBytes> chunk{};auto points=std::span(ink.samples);
+            while(!points.empty()) {if(stop())return false;const auto n=std::min<size_t>(64,points.size());auto bytes=std::span(chunk).first(n*document::wire::sampleBytes);
+                if(!document::wire::samples(points.first(n),bytes))return false;
+                source.update(bytes);spanStats.hashSamples+=n;points=points.subspan(n);}
+            // Derived identity also binds every resident vertex. It prevents
+            // reusing ranges across any live/replay/compiler discrepancy.
+            static_assert(std::endian::native==std::endian::little);
+            auto data=std::span(reinterpret_cast<const uint8_t*>(shape.spline->data()),shape.spline->size()*sizeof(Vertex));
+            while(!data.empty()){if(stop())return false;const auto n=std::min<size_t>(65536,data.size());mesh.update(data.first(n));data=data.subspan(n);}
+            memo.shape=row.shape;memo.epoch=epoch;memo.key={doc,id,row.geometry,source.finish(),mesh.finish()};memo.valid=true;memo.disabled=false;return true;
+        }
+        template<class Stop> void refineSpans(const Scene& scene,const document::Uuid& doc,VisiblePlan& plan,Stop& stop) noexcept {
+            namespace sp=tablet::spans;
+            sp::TimeCharge elapsedRefine{spanStats.refineNs,spanStats.refineMaxNs};
+            if(!spanInitAttempted){spanInitAttempted=true;std::array<char,4096> path{};{std::lock_guard lock(cacheDirMutex);path=cacheDir;}
+#ifdef __ANDROID__
+                spanCache.init(path.data());
+#else
+                spanCache.init(path.data(),true);
+#endif
+            }
+            if(!spanCache.ready())return;
+            constexpr double domain=16777216.;const auto& w=plan.envelope;
+            if(std::max({std::abs(w.minX),std::abs(w.minY),std::abs(w.maxX),std::abs(w.maxY)})>domain)return;
+            bool coldUsed=false;uint32_t pagesLeft=256;size_t considered=0;
+            for(size_t i=0;i<plan.count;++i){
+                if(stop()){++spanStats.cancelled;plan.cutCount=0;return;}
+                auto it=scene.find(plan.ids[i]);if(it==scene.end()||!it->second.shape)continue;
+                const auto& row=it->second;const auto& shape=*row.shape;
+                if(!shape.record||!shape.spline||shape.spline->size()<6*256||shape.spline->size()>sp::maxVertices)continue;
+                if(std::max({std::abs(double(shape.minX)),std::abs(double(shape.minY)),std::abs(double(shape.maxX)),std::abs(double(shape.maxY))})>domain)continue;
+                if(considered++==spanCutLimit||!pagesLeft){++spanStats.limitSkips;break;}
+                auto& memo=spanMemos[uint64_t(plan.ids[i])%spanMemos.size()];
+                const bool same=memo.valid&&memo.epoch==plan.stamp.epoch&&memo.key.id==plan.ids[i]&&memo.key.geometry==row.geometry&&memo.shape.lock()==row.shape;
+                if(!same){if(coldUsed){++spanStats.fallbackRows;continue;}coldUsed=true;memo={};if(!identifySpan(memo,row,doc,plan.ids[i],plan.stamp.epoch,stop)){++spanStats.fallbackRows;continue;}}
+                if(memo.disabled){++spanStats.fallbackRows;continue;}
+                const auto durable=durableFor(plan.stamp.epoch);
+                document::wire::Header header{};if(!document::wire::header(shape.record->brush,shape.dx,shape.dy,header))continue;
+                auto ready=spanCache.lookup(memo.key,durable,uint32_t(shape.spline->size()),header,uint32_t(shape.record->samples.size()));
+                if(!ready){if(same&&coldUsed){++spanStats.fallbackRows;continue;}coldUsed=true;
+                    auto match=[&](uint32_t first,float ax,float ay,float bx,float by,float a,float b,document::SpanBounds& bnd){return matchChord(shape,first,ax,ay,bx,by,a,b,bnd);};
+                    const auto failed=spanStats.buildFailures.load();
+                    ready=spanCache.create(memo.key,durable>=plan.stamp.revision?plan.stamp.revision:0,*shape.record,shape.dx,shape.dy,uint32_t(shape.spline->size()),stop,match);
+                    if(!ready){if(spanStats.buildFailures.load()!=failed)memo.disabled=true;++spanStats.fallbackRows;continue;}
+                }else if(!ready->manifest.durable&&durable>=plan.stamp.revision&&!spanCache.promote(*ready,plan.stamp.revision)){++spanStats.fallbackRows;continue;}
+                // Only a complete cut is published. On overflow, I/O fault,
+                // cancellation or mismatch the existing whole-stroke VBO is
+                // used, not a truncated range. No GL thread disk access.
+                sp::Range range{};bool any=false;
+                auto emit=[&](const sp::Packet& p){if(!any){range=p.vertices;any=true;}else range.count=p.vertices.first+p.vertices.count-range.first;};
+                const auto before=spanStats.readPages.load();sp::TimeCharge elapsedQuery{spanStats.queryNs,spanStats.queryMaxNs};
+                try{
+                    auto work=sp::query(ready->file,ready->manifest,w,pagesLeft,spanStats,stop,emit);
+                    pagesLeft-=work.pages;spanStats.testedSpans+=work.tested;spanStats.selectedSpans+=work.hits;++spanStats.queries;
+                    if(range.count<shape.spline->size()){plan.cuts[plan.cutCount++]={i,row.geometry,range};++spanStats.plannedRows;}
+                }catch(const tablet::spatial::Failure& f){sp::note(spanStats,f);++spanStats.queryFailures;++spanStats.fallbackRows;
+                    pagesLeft-=std::min<uint64_t>(pagesLeft,spanStats.readPages.load()-before);
+                    if(f==tablet::spatial::Failure::Io||f==tablet::spatial::Failure::Invalid)spanCache.invalidate(ready->slot);
+                    if(f==tablet::spatial::Failure::Cancelled){plan.cutCount=0;return;}
+                }catch(...){++spanStats.invalid;++spanStats.queryFailures;++spanStats.fallbackRows;}
+            }
+        }
         void run() noexcept {
             Scene scene; // sole planner owner, existing SceneAllocator ledger
             SceneDelta delta;
             auto takeDelta=[&]() noexcept {return deltas.pop([&](SceneDelta& slot) noexcept {
                 assert(delta.rows.empty());delta.rows.swap(slot.rows);
-                delta.epoch=slot.epoch;delta.revision=slot.revision;delta.head=slot.head;
+                delta.epoch=slot.epoch;delta.revision=slot.revision;delta.head=slot.head;delta.doc=slot.doc;
             });};
-            PlanStamp stamp,last;
+            PlanStamp stamp,last;document::Uuid doc{};
             bool haveLast=false,lastValid=false;
             tablet::spatial::Window lastEnvelope{};
             while(true) {
@@ -496,14 +626,14 @@ namespace {
 #endif
                 if(takeDelta()) {
                     const bool sameEpoch=stamp.epoch==delta.epoch;
-                    const bool incremented=sameEpoch&&tablet::spatial::updateOrdered(index,scene,delta.rows,stamp.head,delta.head,boxOf);
+                    const bool incremented=sameEpoch&&tablet::spatial::updateOrdered(index,scene,delta.rows,stamp.head,delta.head,boxOf,[&]{drainRetired();return stopping.load()||deltas.hasData();});
                     if(!sameEpoch) scene.clear();
                     for(auto it=delta.rows.begin();it!=delta.rows.end();) {
                         scene.erase(it->first);
                         if(!it->second.shape) it=delta.rows.erase(it);else ++it;
                     }
                     scene.merge(delta.rows);
-                    stamp.epoch=delta.epoch;stamp.revision=delta.revision;stamp.head=delta.head;
+                    stamp.epoch=delta.epoch;stamp.revision=delta.revision;stamp.head=delta.head;doc=delta.doc;
                     if(!incremented)rebuildIndex(scene,stamp.head);
                     // Context rebuild can resend the same revision; never
                     // retain a plan from before consuming a delta batch.
@@ -520,7 +650,7 @@ namespace {
                 const auto exact=stamp.window();
                 if(haveLast&&stamp.same(last))continue;
                 if(haveLast&&lastValid&&stamp.sameScene(last)&&lastEnvelope.contains(exact)) {last.view=stamp.view;++envelopeReuse;continue;}
-                auto& plan=plans.write();plan.stamp=stamp;plan.count=0;plan.valid=false;plan.indexed=false;
+                auto& plan=workingPlan;plan.stamp=stamp;plan.count=0;plan.cutCount=0;plan.valid=false;plan.indexed=false;
                 // Prefetch a conservative 20% margin on each side. This is
                 // an ID superset, not a tile image. GL rechecks exact bounds
                 // in the actual viewport and composites whole strokes once.
@@ -557,11 +687,15 @@ namespace {
                 }
                 if(stop()){++cancelled;continue;}
                 if(!plan.valid)++invalid;else if(plan.indexed)++indexedPlans;else ++linearPlans;
-                last=stamp;lastEnvelope=plan.envelope;lastValid=plan.valid;haveLast=true;plans.publish();++built;
+                last=stamp;lastEnvelope=plan.envelope;lastValid=plan.valid;haveLast=true;publishPlan(plan);
+                if(plan.valid&&plan.indexed&&plan.count){
+                    refineSpans(scene,doc,plan,stop);
+                    if(plan.cutCount&&!stop())publishPlan(plan);
+                }
             }
             // All CPU references in this lane are released on its own thread.
             if(takeDelta()) delta.rows.clear();
-            index.reset();drainRetired();
+            index.reset();spanCache.close();drainRetired();
         }
         const VisiblePlan* latch(const RenderLatch& frame,int w,int h) noexcept {
             if(!enabled.load(std::memory_order_acquire)) return nullptr;
@@ -967,13 +1101,13 @@ void main() {
                               sizeof(Vertex), (void*)offsetof(Vertex, dirX));
     }
 
-    struct Part { GLuint vbo; GLsizei count; };
+    struct Part { GLuint vbo; GLsizei count; GLint first=0; };
     // GL-thread only; a layer is either a completed mesh or stable/tail/tip.
     std::array<Part,3> parts{};
     size_t partCount=0;
-    void drawCached(GLuint vbo, GLsizei count, float, float, float) {
+    void drawCached(GLuint vbo, GLsizei count, float, float, float,GLint first=0) {
         if (!program || !vbo || count <= 0) return;
-        parts.at(partCount++)={vbo,count};
+        parts.at(partCount++)={vbo,count,first};
     }
 
     template<class Gather>
@@ -1006,7 +1140,7 @@ void main() {
             for(size_t i=0;i<partCount;++i) {
                 glBindBuffer(GL_ARRAY_BUFFER,parts[i].vbo);
                 bindAttributes();
-                glDrawArrays(GL_TRIANGLES,0,parts[i].count);
+                glDrawArrays(GL_TRIANGLES,parts[i].first,parts[i].count);
                 ++frameDrawCalls;
             }
         }
@@ -1169,9 +1303,11 @@ void main() {
         }
     }
 
-    void drawFinishedPart(CachedGpuStroke& item, int part, float r, float g, float b) {
+    void drawFinishedPart(CachedGpuStroke& item, int part, float r, float g, float b,const tablet::spans::Range* cut=nullptr) {
         const auto& vertices = *item.source[part];
         if (vertices.empty()) return;
+        if(cut&&(cut->first%6||cut->count%6||cut->first>vertices.size()||cut->count>vertices.size()-cut->first))cut=nullptr;
+        if(cut&&!cut->count){++spanStats.renderedRows;spanStats.verticesSaved+=vertices.size();return;}
         if (!item.vbo[part]) {
             glGenBuffers(1, &item.vbo[part]);
             if (!item.vbo[part]) return;
@@ -1198,7 +1334,8 @@ void main() {
             frameUploadBytes+=bytes;
             cacheUploadBytes+=bytes;
         }
-        drawCached(item.vbo[part], item.count[part], r, g, b);
+        drawCached(item.vbo[part],cut?GLsizei(cut->count):item.count[part],r,g,b,cut?GLint(cut->first):0);
+        if(cut){++spanStats.renderedRows;spanStats.verticesSaved+=vertices.size()-cut->count;}
     }
 
     struct ViewTrace {
@@ -1331,6 +1468,7 @@ static bool readyModel() {
     if(!model) {
         model=std::make_unique<document::Document>(document::Uuid{1});
         model->grant(1,INT64_MAX); model->observe(&sceneSink);
+        {std::lock_guard publish(publicationMutex);sceneDocument=model->identity();}
     }
 #endif
     return bool(model);
@@ -1763,7 +1901,7 @@ static bool reconstructV1(const std::shared_ptr<const document::Ink>& record,Fin
         peak(switchHigh,geometry->bytes+fixedScratch+document::Ink::liveBytes.load()+retainedMeshes.load()+gpuRequested.load());
         retainedMeshes.fetch_add(geometry->bytes,std::memory_order_relaxed);
         out={record,{geometry,&geometry->derived[0]},{geometry,&geometry->derived[1]},
-                    {geometry,&geometry->derived[2]},b.minX,b.minY,b.maxX,b.maxY,0};
+                    {geometry,&geometry->derived[2]},b.minX,b.minY,b.maxX,b.maxY,0,dx,dy};
         observation.ok=true;return true;
     } catch(const std::bad_alloc&) {return false;}
       catch(const std::length_error&) {return false;}
@@ -1878,6 +2016,14 @@ JNIEXPORT jint JNICALL Java_com_infinipaint_demo_NativeBridge_command(JNIEnv* en
 #ifdef IP_REPLAY_TEST
 // Exercise the real edit observer/publication path with a middle splice.
 // Host-only fixture, not a new application operation or JNI interface.
+bool ipTestMoveBatch(int64_t first,int64_t last,double dy) {
+    using namespace document;
+    if(!model||!suspended||!live.empty()||first<=0||last<first||last-first>=128)return false;
+    std::vector<Edit> edits;for(auto id=first;id<=last;++id){const auto* row=model->find(id);if(!row)return false;auto value=row->value;value.dy+=dy;edits.push_back({Edit::Replace,id,std::move(value)});}
+    sceneSink.worker=true;struct Reset{~Reset(){sceneSink.worker=false;}} reset;
+    if(model->edit(model->revision(),edits)!=Status::Ok)return false;
+    visibleRevision.store(model->revision());historyCharge.store(model->historyBytes());canonicalCharge.store(model->canonicalBytes());peak(queueHigh,saves.bytes());return true;
+}
 bool ipTestMiddleSplice(int64_t after,int64_t removedId,int variant) {
     using namespace document;
     if(!model||!suspended||!live.empty())return false;
@@ -2196,7 +2342,7 @@ Java_com_infinipaint_demo_NativeBridge_render(
                 renderLatch.epoch=finishedEpoch;
                 renderLatch.revision=sceneRevision;
                 newCompleted.swap(pendingScene);
-                renderLatch.head=sceneHead;
+                renderLatch.head=sceneHead;renderLatch.doc=sceneDocument;
                 if(liveChanged) {
                     retiredView=std::move(renderLatch.active);
                     renderLatch.active=publishedLive;
@@ -2281,12 +2427,12 @@ Java_com_infinipaint_demo_NativeBridge_render(
     const double viewMaxX = viewMinX + width/(double)(float)frameZoom;
     const double viewMaxY = viewMinY + height/(double)(float)frameZoom;
     uint64_t visibleCompleted = 0;
-    auto drawCompleted=[&](CachedGpuStroke& cached) {
+    auto drawCompleted=[&](CachedGpuStroke& cached,const tablet::spans::Range* cut=nullptr) {
         ++visibleCompleted;
         auto drawPart = [&](int part, float r, float g, float b) {
             if(part==2) {r=cached.rgba[0];g=cached.rgba[1];b=cached.rgba[2];}
             coverageLayer({cached.minX,cached.minY,cached.maxX,cached.maxY},framePanX,framePanY,frameZoom,r,g,b,
-                [&]{drawFinishedPart(cached,part,r,g,b);},cached.rgba[3]);
+                [&]{drawFinishedPart(cached,part,r,g,b,part==2?cut:nullptr);},cached.rgba[3]);
         };
         if (mode == 0) drawPart(0, 0.20f, 0.95f, 0.78f);
         else if (mode == 1) drawPart(1, 1.0f, 0.76f, 0.20f);
@@ -2306,10 +2452,13 @@ Java_com_infinipaint_demo_NativeBridge_render(
         if(plan->indexed)++planner.indexedFrames;else ++planner.linearFrames;
         if(plan->stamp.view.sequence!=frame.view.sequence)++planner.envelopeFrames;
         planner.planIdsTested+=plan->count;
+        size_t cutIndex=0;
         for(size_t i=0;i<plan->count;++i) {
             auto& cached=gpuFinished.at(plan->ids[i]);
+            const tablet::spans::Range* cut=nullptr;
+            if(cutIndex<plan->cutCount&&plan->cuts[cutIndex].index==i){const auto& c=plan->cuts[cutIndex++];if(c.geometry==cached.geometry)cut=&c.vertices;}
             if(cached.maxX<viewMinX || cached.minX>viewMaxX || cached.maxY<viewMinY || cached.minY>viewMaxY)continue;
-            drawCompleted(cached);
+            drawCompleted(cached,cut);
         }
     } else {
         if(plan) ++planner.fallbacks;
@@ -2456,6 +2605,14 @@ JNIEXPORT jlongArray JNICALL Java_com_infinipaint_demo_NativeBridge_spatialCount
     a[stats.size()+6]=planner.envelopeFrames.load();a[stats.size()+7]=planner.planIdsTested.load();a[stats.size()+8]=planner.residentFallbackRows.load();
     auto arr=env->NewLongArray(a.size());if(arr)env->SetLongArrayRegion(arr,0,a.size(),a.data());return arr;
 }
+JNIEXPORT jlongArray JNICALL Java_com_infinipaint_demo_NativeBridge_spanStreamCounters(JNIEnv* env,jclass) {
+    const auto stats=spanStats.snapshot();std::array<jlong,stats.size()> a{};std::copy(stats.begin(),stats.end(),a.begin());
+    auto arr=env->NewLongArray(a.size());if(arr)env->SetLongArrayRegion(arr,0,a.size(),a.data());return arr;
+}
+JNIEXPORT jlongArray JNICALL Java_com_infinipaint_demo_NativeBridge_spatialCompactionCounters(JNIEnv* env,jclass) {
+    const auto stats=spatialStats.compact.snapshot();std::array<jlong,stats.size()> a{};std::copy(stats.begin(),stats.end(),a.begin());
+    auto arr=env->NewLongArray(a.size());if(arr)env->SetLongArrayRegion(arr,0,a.size(),a.data());return arr;
+}
 JNIEXPORT jlongArray JNICALL Java_com_infinipaint_demo_NativeBridge_paintOrderCounters(JNIEnv* env,jclass) {
     const auto stats=spatialStats.order.snapshot();std::array<jlong,stats.size()> a{};
     std::copy(stats.begin(),stats.end(),a.begin());
@@ -2510,6 +2667,8 @@ void hostForcePlannerFallback(bool force){planner.testForceFallback=force;}
 std::array<uint64_t,8> hostPlannerStats(){return {planner.enabled.load(),planner.hits.load(),planner.fallbacks.load(),planner.built.load(),planner.cancelled.load(),planner.invalid.load(),planner.backpressure.load(),planner.retired.load()};}
 std::array<uint64_t,39> hostSpatialStats(){return spatialStats.snapshot();}
 std::array<uint64_t,32> hostPaintOrderStats(){return spatialStats.order.snapshot();}
+std::array<uint64_t,34> hostSpanStats(){return spanStats.snapshot();}
+std::array<uint64_t,15> hostCompactionStats(){return spatialStats.compact.snapshot();}
 std::array<uint64_t,5> hostSpatialFrameStats(){return {planner.indexedFrames.load(),planner.linearFrames.load(),planner.envelopeFrames.load(),planner.planIdsTested.load(),planner.residentFallbackRows.load()};}
 void hostSpatialFault(int fault){planner.testSpatialFault.store(fault);planner.request();}
 void hostParkPlanner(){planner.testPark.store(true);planner.request();}
@@ -2564,7 +2723,7 @@ void activate(double x,double y,double zoom) noexcept {
         sceneRevision=model->revision();
         sceneBytes=stagedBytes;sceneLimit=stagedLimit;canonicalLimit=stagedCanonicalLimit;
         desiredView.publish(x,y,zoom);planner.request();
-        ++finishedEpoch; persistent=true;
+        ++finishedEpoch; persistent=true;sceneDocument=model->identity();setDurable(finishedEpoch,model->revision());
         model->observe(&sceneSink);
         visibleRevision.store(model->revision());
         historyCharge.store(0);canonicalCharge.store(model->canonicalBytes());
@@ -2575,6 +2734,8 @@ std::shared_ptr<const document::ChangeSet> nextSave() {
     std::lock_guard guard(stateMutex); return saves.front();
 }
 bool acknowledge(const std::shared_ptr<const document::ChangeSet>& token) {
-    std::lock_guard guard(stateMutex); return saves.acknowledge(token);
+    std::lock_guard guard(stateMutex);const bool ok=saves.acknowledge(token);
+    if(ok&&model&&token->document==model->identity())setDurable(finishedEpoch,token->base+1);
+    return ok;
 }
 }

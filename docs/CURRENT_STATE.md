@@ -1,3 +1,7 @@
+# M04 — Integrated span access and local compaction candidate
+
+Baseline `9db632b4662da8113273d95eb0abca6d901d9156`. [Scope, limitations and host evidence](../reports/M04_SPAN_STREAMING.md): persistent per-record derived span pages, viewport-driven exact resident vertex-range pruning and bounded coarse-tree compaction. Host candidate, Android pending. Package 1 is not complete: global span roots, persistent paired manifest and nonresident viewport retrieval remain open. No new architecture approval or backend change.
+
 # M04 — Canonical span streaming (first slice, functionally verified)
 
 Counted ordering checkpoint `4b0710b` is owner-accepted. [Canonical replay and targeted range reader](../reports/M04_CANONICAL_STREAM.md) functionally verified; Android and tablet acceptance passed. Production reconstruction is rolling and bounded; full viewport streaming, paired span roots, compaction, LOD and residency remain open. No budget or backend change.

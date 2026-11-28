@@ -154,15 +154,38 @@ static void faults(){
     check(!writeOk&&s.ioFaults==priorIo+1&&s.diskBytes==0&&s.dynamicBytes==0,"partial write fault releases roots and charges");
     check(buildPlain(*i,700),"recovery after partial write");i->reset();
     std::printf("PASS %d allocation failure points and real partial-write fault\n",failures);
-    // Overlay cap forces paired-root rebuild; deletion masks old base IDs.
+    // Overlay cap compacts affected spatial pages; deletion masks old base IDs.
     Fixture f;for(int n=1;n<=400;++n){f.order.push_back(n);f.scene[n].box={float(n),0,float(n+1),1};}f.links();check(f.rebuild(),"overlay base");
     for(int n=1;n<=257;++n){auto old=f.scene;auto head=f.head();f.scene.erase(n);f.order.erase(f.order.begin());f.transition(std::move(old),head);}
-    check(f.stats.compactions==1&&f.fastEdits==256,"exact overlay compaction breakpoint");f.compare({-1,-1,10000,10000});
+    check(f.stats.compactions==1&&f.fastEdits==257&&f.stats.builds==1,"exact overlay compaction breakpoint");f.compare({-1,-1,10000,10000});
     // An incomplete delta must not be treated as a valid append/deletion.
     Scene incomplete{{f.order[10],{0,0,false,{}}}};
     check(!updateOrdered(*f.index,f.scene,incomplete,f.head(),f.head(),boxOf),"reject missing reciprocal deletion patch");
     f.compare({-1,-1,10000,10000});
     std::puts("PASS fault injection, cancellation, capacity, overlay compaction, incomplete delta");
+}
+static void compactionFaults(){
+    auto prepare=[](Index& i){check(buildPlain(i,400),"compaction base");i.beginUpdate();
+        for(Key k=1;k<=4;++k)i.replace(k,{float(k*4+3000),0,float(k*4+3002),2},{float((k-1)*4),0,float((k-1)*4+2),2});
+        for(Key k=401;k<=652;++k){i.insertAfter(400,k,{0,0,1,1});i.remove(k,{0,0,1,1});}
+        i.finishUpdate(400);};
+    unsigned failures=0;
+    for(int n=0;n<128;++n){Stats s;auto i=std::make_unique<Index>(s);prepare(*i);const auto before=s.order.writes.load();i->failWritesAfter(n);
+        if(i->reserveOverlay(1,1,noStop)){check(n==int(failures)&&s.compact.success==1&&s.builds==1&&s.order.writes==before,"compaction only spatial writes");std::array<Key,512> out{};size_t count=0;check(i->query({-1,-1,1e6,3},out,count,noStop)==Index::Result::Ok&&count==400,"compacted exact count");for(size_t j=0;j<count;++j)check(out[j]==Key(j+1),"compacted paint order");break;}
+        ++failures;check(!i->ready()&&s.diskBytes==0&&s.dynamicBytes==0&&s.compact.failed==1,"failed compaction invalidates paired generation");i->failWritesAfter(-1);check(buildPlain(*i,400),"recovery after failed compaction");}
+    check(failures>0&&failures<128,"all compaction write sites swept");
+    for(int n=1;n<25;++n){Stats s;auto i=std::make_unique<Index>(s);prepare(*i);int polls=0;auto stop=[&]{return ++polls>=n;};check(!i->reserveOverlay(1,1,stop)&&!i->ready()&&s.diskBytes==0&&s.dynamicBytes==0,"mid-compaction cancellation fails closed");}
+    std::printf("PASS compaction %u injected writes, 24 cancellation positions, paired-generation recovery\n",failures);
+}
+static void compactionEvictionFaults(){
+    auto prepare=[](Index& i){check(buildPlain(i,8192),"eviction fixture build");i.beginUpdate();
+        for(Key j=0;j<40;++j){Key k=1+128*j;float x=float((k-1)*4);i.replace(k,{x,20,x+2,22},{x,0,x+2,2});}
+        for(Key k=8193;k<=8408;++k){i.insertAfter(8192,k,{0,0,1,1});i.remove(k,{0,0,1,1});}i.finishUpdate(8192);};
+    uint64_t writes=0;{Stats s;auto i=std::make_unique<Index>(s);prepare(*i);check(i->reserveOverlay(1,1,noStop),"eviction control");writes=s.compact.compactWrites.load();check(writes>cacheSlots,"dirty eviction before final flush");}
+    for(uint64_t n=0;n<writes;++n){Stats s;auto i=std::make_unique<Index>(s);prepare(*i);i->failWritesAfter(int64_t(n));check(!i->reserveOverlay(1,1,noStop)&&!i->ready()&&s.diskBytes==0&&s.dynamicBytes==0&&s.compact.failed==1,"dirty eviction or final flush fails closed");check(buildPlain(*i,8192),"dirty eviction recovery");}
+    std::printf("PASS all %llu dirty-eviction/final-flush write failure sites\n",(unsigned long long)writes);
+    Stats s;auto i=std::make_unique<Index>(s);check(i->rebuild("/tmp",65537,[](auto emit){for(Key k=1;k<=65537;++k)emit(k,{0,0,1,1});return true;},noStop),"dense compaction build");i->beginUpdate();for(Key k=65282;k<=65537;++k)i->replace(k,{10,10,11,11},{0,0,1,1});i->finishUpdate(65537);
+    check(!i->reserveOverlay(1,1,noStop)&&s.capacity==1&&s.compact.visits==8193&&!i->ready()&&s.diskBytes==0,"dense overlap work cap and fail closed");std::puts("PASS dense compaction 8192-page visit ceiling, no partial roots");
 }
 static void dense(){
     Stats s;auto index=std::make_unique<Index>(s);std::vector<Key> out(65536);size_t count=0;
@@ -195,10 +218,16 @@ static void scale(size_t n){
     check(after[18]-before[18]<n*300,"fixed k sparse bounds pruning");
     index->reset();check(s.dynamicBytes==0&&s.diskBytes==0,"scale retirement");
 }
+static void localizedScale(){
+    for(size_t n:{1000,10000,100000}){Stats s;auto index=std::make_unique<Index>(s);check(buildPlain(*index,n),"localized scale build");std::vector<Key> out(512);size_t count=0;std::vector<uint64_t> times,visits,writes;
+        for(int cycle=0;cycle<8;++cycle){index->beginUpdate();for(Key k=1;k<=256;++k){float x=float((k-1)*4);index->replace(k,{x,float((cycle+1)*4),x+2,float((cycle+1)*4+2)},{x,float(cycle*4),x+2,float(cycle*4+2)});}index->finishUpdate(Key(n));auto a=s.compact.snapshot();const auto orderWrites=s.order.writes.load();auto start=Clock::now();check(index->reserveOverlay(1,1,noStop),"localized scale compact");times.push_back(elapsed(start));auto b=s.compact.snapshot();visits.push_back(b[3]-a[3]);writes.push_back(b[12]-a[12]);check(s.order.writes==orderWrites&&s.builds==1&&s.compact.success==uint64_t(cycle+1),"no order write or rebuild");check(index->query({-1,double((cycle+1)*4),1023,double((cycle+1)*4+2)},out,count,noStop)==Index::Result::Ok&&count==256,"local query");for(size_t j=0;j<count;++j)check(out[j]==Key(j+1),"local exact order");check(index->query({-1,double(cycle*4),1023,double(cycle*4+2)},out,count,noStop)==Index::Result::Ok&&count==0,"old region empty");}
+        std::sort(times.begin(),times.end());std::sort(visits.begin(),visits.end());std::sort(writes.begin(),writes.end());std::printf("localized N=%zu cycles=8 rows/cycle=256 rebuilds=0 median_ms=%.3f max_ms=%.3f median_visits=%llu max_visits=%llu median_writes=%llu max_writes=%llu peak_disk=%llu\n",n,times[4]/1e6,times.back()/1e6,(unsigned long long)visits[4],(unsigned long long)visits.back(),(unsigned long long)writes[4],(unsigned long long)writes.back(),(unsigned long long)s.diskPeak.load());}
+}
 int main(int argc,char**argv){
+    if(argc>1&&std::string_view(argv[1])=="compact-scale"){localizedScale();return 0;}
     if(argc>1&&std::string_view(argv[1])=="scale"){scale(1000);scale(10000);scale(100000);return 0;}
-    if(argc>1&&std::string_view(argv[1])=="faults"){faults();dense();return 0;}
+    if(argc>1&&std::string_view(argv[1])=="faults"){faults();compactionFaults();compactionEvictionFaults();dense();return 0;}
     const uint64_t seed=argc>1?std::strtoull(argv[1],nullptr,10):13792;
     randomized(seed,argc>2?std::strtoull(argv[2],nullptr,10):1200);
-    if(argc==1){faults();dense();scale(1000);scale(10000);scale(100000);}
+    if(argc==1){faults();compactionFaults();compactionEvictionFaults();dense();scale(1000);scale(10000);scale(100000);localizedScale();}
 }

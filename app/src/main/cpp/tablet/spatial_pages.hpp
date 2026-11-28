@@ -60,7 +60,14 @@ struct OrderStats {
             validationChecks.load(),validationRejected.load(),validationNs.load(),validationMaxNs.load(),largeBatches.load(),noCompatibleBase.load(),overlayPreflight.load(),rankCacheShifted.load(),rankCacheDropped.load(),rankCacheSeeded.load()};
     }
 };
+struct CompactionStats {
+    std::atomic<uint64_t> attempts{0},success{0},failed{0},visits{0},writes{0},reused{0},released{0},splits{0},merges{0},rows{0},ns{0},maxNs{0},compactWrites{0},compactReads{0},compactHits{0};
+    std::array<uint64_t,15> snapshot() const noexcept {
+        return {attempts.load(),success.load(),failed.load(),visits.load(),writes.load(),reused.load(),released.load(),splits.load(),merges.load(),rows.load(),ns.load(),maxNs.load(),compactWrites.load(),compactReads.load(),compactHits.load()};
+    }
+};
 struct Stats {
+    CompactionStats compact;
     OrderStats order;
     std::atomic<uint64_t> ready{0},baseRows{0},overlayRows{0},diskBytes{0},diskPeak{0},dynamicBytes{0},dynamicPeak{0};
     std::atomic<uint64_t> builds{0},incremental{0},queries{0},cancelled{0},fallbacks{0},ioFaults{0},invalid{0},capacity{0},compactions{0};
@@ -156,6 +163,9 @@ struct Page {
         if(magic!=0x49505331||kind<SpatialLeaf||kind>FreePage)return false;
         if(kind==FreePage)return count==0;
         if(!count||count>(kind<=SpatialBranch?spatialFanout:sequenceKind(kind)?sequenceFanout:orderFanout))return false;
+        if(kind==SpatialLeaf&&parent!=0)return false;
+        if(kind==SpatialBranch&&(parent==0||parent>16))return false;
+        if(kind<=SpatialBranch)for(size_t i=0;i<count;++i)if(!entries[i].box.valid()||entries[i].key<=0||entries[i].value!=0)return false;
         if(kind>=SequenceLeaf)for(size_t i=0;i<count;++i){
             const auto& r=entries[i];
             if(r.key<=0||(kind==SequenceLeaf?r.value!=0:r.value==0))return false;
@@ -172,7 +182,8 @@ class PageFile {
 #ifndef __ANDROID__
     int64_t failWrite_=-1;
 #endif
-    struct Slot {uint64_t id=0,age=0;Page page;};
+    struct Slot {uint64_t id=0,age=0;Page page;bool dirty=false;};
+    bool batchingSpatial_=false;
     std::array<Slot,cacheSlots> cache_{};
     static bool transfer(int fd,void* data,size_t bytes,off_t offset,bool writing) noexcept {
         auto* p=static_cast<unsigned char*>(data);
@@ -184,21 +195,36 @@ class PageFile {
         }
         return true;
     }
-    void store(uint64_t id,Page& p) {
-        if(!p.structural())throw Failure::Invalid;
-        p.checksum=p.digest();
+    void writeDisk(uint64_t id,Page& p,bool spatialFree=false) {
 #ifndef __ANDROID__
         if(failWrite_==0) {
-            // Write a real partial page, then report the injected failure.
             (void)transfer(fd_,&p,32,off_t((id-1)*pageBytes),true);
             throw Failure::Io;
         }
         if(failWrite_>0)--failWrite_;
 #endif
         if(!transfer(fd_,&p,sizeof(p),off_t((id-1)*pageBytes),true)) throw Failure::Io;
-        if(p.kind>=SequenceLeaf){++stats_.order.writes;stats_.order.writeBytes+=pageBytes;}
+        if(p.kind>=SequenceLeaf&&!spatialFree){++stats_.order.writes;stats_.order.writeBytes+=pageBytes;}
+        else ++stats_.compact.writes;
+    }
+    void flushSlot(Slot& slot) {
+        if(slot.dirty){if(!batchingSpatial_||!slot.id)throw Failure::Invalid;writeDisk(slot.id,slot.page,true);slot.dirty=false;}
+    }
+    Slot& victim() noexcept {
+        auto* slot=&cache_.front();for(auto& s:cache_)if(!s.id||s.age<slot->age)slot=&s;return *slot;
+    }
+    void store(uint64_t id,Page& p,bool spatialFree=false) {
+        if(!p.structural())throw Failure::Invalid;
+        p.checksum=p.digest();
+        if(batchingSpatial_){
+            if(p.kind>SpatialBranch&&!(p.kind==FreePage&&spatialFree))throw Failure::Invalid;
+            for(auto& slot:cache_)if(slot.id==id){slot.page=p;slot.age=++clock_;slot.dirty=true;return;}
+            auto& slot=victim();flushSlot(slot);slot.page=p;slot.id=id;slot.age=++clock_;slot.dirty=true;return;
+        }
+        writeDisk(id,p,spatialFree);
         for(auto& slot:cache_)if(slot.id==id){slot.page=p;slot.age=++clock_;break;}
     }
+
 public:
     explicit PageFile(Stats& s,uint64_t limit=diskLimit):stats_(s),limit_(limit){}
     ~PageFile(){reset();}
@@ -210,7 +236,7 @@ public:
 #ifndef __ANDROID__
         failWrite_=-1;
 #endif
-        for(auto& s:cache_) {s.id=0;s.age=0;}
+        batchingSpatial_=false;for(auto& s:cache_) {s.id=0;s.age=0;s.dirty=false;}
     }
     void create(const char* directory,uint64_t required) {
         reset();char name[4096];
@@ -231,11 +257,12 @@ public:
         if(fd_<0) throw Failure::Io;
         if(p.kind==FreePage)throw Failure::Invalid;
         uint64_t id;
-        if(free_ && p.kind>=SequenceLeaf) {
+        if(free_) {
             Work w;id=free_;const auto& old=read(id,w);
             if(old.kind!=FreePage||old.parent==id||old.parent>pages_)throw Failure::Invalid;
-            free_=old.parent;--stats_.order.freePages;++stats_.order.reused;
-            stats_.order.maintenanceReads+=w.reads;stats_.order.maintenanceHits+=w.hits;
+            free_=old.parent;--stats_.order.freePages;
+            if(p.kind<=SpatialBranch){++stats_.compact.reused;stats_.compact.compactReads+=w.reads;stats_.compact.compactHits+=w.hits;}
+            else {++stats_.order.reused;stats_.order.maintenanceReads+=w.reads;stats_.order.maintenanceHits+=w.hits;}
         }else{
             if(pages_>=limit_/pageBytes) throw Failure::Capacity;
             id=++pages_;
@@ -248,28 +275,35 @@ public:
         return id;
     }
     void overwrite(uint64_t id,Page& p) {
-        if(!id||id>pages_||fd_<0||p.kind<SequenceLeaf||p.kind==FreePage)throw Failure::Invalid;
+        if(!id||id>pages_||fd_<0||p.kind==FreePage)throw Failure::Invalid;
         store(id,p);
     }
     void release(uint64_t id,uint32_t kind) {
-        if(!id||id>pages_||fd_<0||(!sequenceKind(kind)&&!locatorKind(kind)))throw Failure::Invalid;
-        Page p{};p.kind=FreePage;p.parent=free_;store(id,p);free_=id;
-        if(sequenceKind(kind))--stats_.order.sequencePages;else --stats_.order.locatorPages;
+        if(!id||id>pages_||fd_<0||(kind<SpatialLeaf||kind>=FreePage))throw Failure::Invalid;
+        Page p{};p.kind=FreePage;p.parent=free_;store(id,p,kind<=SpatialBranch);free_=id;
+        if(sequenceKind(kind))--stats_.order.sequencePages;else if(locatorKind(kind))--stats_.order.locatorPages;else ++stats_.compact.released;
         ++stats_.order.freePages;
+    }
+    // Private generation only: write-back is bounded by the existing page
+    // slots. Dirty eviction writes immediately; successful compaction flushes
+    // every remaining dirty page. Any exception drops both derived roots.
+    void beginSpatialBatch(){if(batchingSpatial_)throw Failure::Invalid;batchingSpatial_=true;}
+    template<class Stop> void finishSpatialBatch(Stop& stop){
+        if(!batchingSpatial_)throw Failure::Invalid;
+        for(auto& slot:cache_){if(stop())throw Failure::Cancelled;flushSlot(slot);}
+        if(stop())throw Failure::Cancelled;
+        batchingSpatial_=false;
     }
     const Page& read(uint64_t id,Work& work) {
         if(!id||id>pages_||fd_<0) throw Failure::Invalid;
-        Slot* victim=&cache_.front();
-        for(auto& s:cache_) {
-            if(s.id==id) {s.age=++clock_;++work.hits;return s.page;}
-            if(!s.id||s.age<victim->age) victim=&s;
-        }
-        victim->id=0; // never publish a partial or invalid read
+        for(auto& s:cache_)if(s.id==id){s.age=++clock_;++work.hits;return s.page;}
+        auto& slot=victim();flushSlot(slot);slot.id=0; // never publish a partial or invalid read
         ++work.reads;
-        if(!transfer(fd_,&victim->page,sizeof(Page),off_t((id-1)*pageBytes),false)) throw Failure::Io;
-        if(!victim->page.valid()) throw Failure::Invalid;
-        victim->id=id;victim->age=++clock_;return victim->page;
+        if(!transfer(fd_,&slot.page,sizeof(Page),off_t((id-1)*pageBytes),false)) throw Failure::Io;
+        if(!slot.page.valid()) throw Failure::Invalid;
+        slot.id=id;slot.age=++clock_;return slot.page;
     }
+
 #ifndef __ANDROID__
     uint64_t pageCount()const noexcept{return pages_;}
     uint64_t freeHead()const noexcept{return free_;}
@@ -287,7 +321,7 @@ namespace engine::tablet::spatial {
 // All mutable operations and I/O are performed by the single planner owner.
 // An invalidation discards both access roots; no partial index is queryable.
 class Index {
-    struct Overlay {Key id=0;Box box{};bool present=false;};
+    struct Overlay {Key id=0;Box box{},baseBox{};bool present=false,basePresent=false;};
     struct Node {Box box{};uint16_t left=0,right=0,entry=0;bool leaf=false;};
     struct Ranked {Key id;uint64_t rank;uint64_t leaf=0;};
     struct RankCache {Key id;uint64_t rank;};
@@ -325,7 +359,7 @@ class Index {
     template<class Stop> uint64_t buildTree(Records& rows,Stop&& stop) {
         if(rows.empty()) return 0;
         const size_t fanout=spatialFanout;
-        bool leaf=true;
+        bool leaf=true;uint64_t level=0;
         while(true) {
             if(stop()) throw Failure::Cancelled;
             pack(rows);
@@ -335,7 +369,7 @@ class Index {
             parents.reserve((rows.size()-1)/fanout+1);
             for(size_t i=0;i<rows.size();i+=fanout) {
                 if(stop()) throw Failure::Cancelled;
-                Page p{};p.kind=leaf?SpatialLeaf:SpatialBranch;
+                Page p{};p.kind=leaf?SpatialLeaf:SpatialBranch;p.parent=level;
                 p.count=uint32_t(std::min(fanout,rows.size()-i));
                 std::copy_n(rows.begin()+i,p.count,p.entries.begin());
                 Box box=p.entries[0].box;
@@ -344,20 +378,144 @@ class Index {
                 parents.push_back({box,Key(page),0});
             }
             if(parents.size()==1) return uint64_t(parents[0].key);
-            rows.swap(parents);leaf=false;
+            rows.swap(parents);leaf=false;++level;
         }
+    }
+    // Private single-owner mutable maintenance of the affected packed pages.
+    // Height is stored in Page::parent for spatial pages (order pages retain
+    // their parent pointer). Height strictly decreases on traversal, including
+    // reused page IDs; this replaces the original append-only ID invariant.
+    struct SpatialNode {
+        uint32_t level=0,count=0;
+        std::array<Record,spatialFanout+1> rows{};
+    };
+    static constexpr uint64_t compactVisitLimit=8192;
+    bool (*compactionStop_)(void*)=nullptr;void* compactionContext_=nullptr;
+    SpatialNode loadSpatial(uint64_t id,Work& work,int expected=-1) {
+        if(compactionStop_&&compactionStop_(compactionContext_))throw Failure::Cancelled;
+        if(++work.pages>compactVisitLimit)throw Failure::Capacity;
+        const auto& p=file_.read(id,work);
+        if((p.kind!=SpatialLeaf&&p.kind!=SpatialBranch)||p.parent>16||
+           (expected>=0&&p.parent!=uint64_t(expected)))throw Failure::Invalid;
+        SpatialNode n{};n.level=uint32_t(p.parent);n.count=p.count;
+        std::copy_n(p.entries.begin(),p.count,n.rows.begin());return n;
+    }
+    static Box nodeBox(const SpatialNode& n) {
+        if(!n.count)throw Failure::Invalid;
+        Box b=n.rows[0].box;for(size_t j=1;j<n.count;++j)b=cover(b,n.rows[j].box);return b;
+    }
+    uint64_t saveSpatial(uint64_t id,const SpatialNode& n) {
+        if(!n.count||n.count>spatialFanout||n.level>16)throw Failure::Invalid;
+        Page p{};p.kind=n.level?SpatialBranch:SpatialLeaf;p.parent=n.level;p.count=n.count;
+        std::copy_n(n.rows.begin(),n.count,p.entries.begin());
+        if(id){file_.overwrite(id,p);return id;}return file_.write(p);
+    }
+    static double area(Box b) noexcept {return (double(b.maxX)-b.minX)*(double(b.maxY)-b.minY);}
+    static double margin(Box b) noexcept {return double(b.maxX)-b.minX+double(b.maxY)-b.minY;}
+    static bool contains(Box outer,Box inner) noexcept {
+        return outer.minX<=inner.minX&&outer.minY<=inner.minY&&outer.maxX>=inner.maxX&&outer.maxY>=inner.maxY;
+    }
+    struct SpatialSplit {Record left{},right{};};
+    SpatialSplit insertSpatial(uint64_t page,Record row,Work& work,int expected=-1) {
+        auto n=loadSpatial(page,work,expected);
+        if(!n.level)n.rows[n.count++]=row;
+        else {
+            size_t slot=0;
+            auto score=[&](Box b){const auto joined=cover(b,row.box);return std::array<double,4>{area(joined)-area(b),margin(joined)-margin(b),area(b),margin(b)};};
+            for(size_t j=1;j<n.count;++j)if(score(n.rows[j].box)<score(n.rows[slot].box))slot=j;
+            auto child=insertSpatial(uint64_t(n.rows[slot].key),row,work,int(n.level)-1);
+            n.rows[slot]=child.left;if(child.right.key)n.rows[n.count++]=child.right;
+        }
+        if(n.count<=spatialFanout){saveSpatial(page,n);return {{nodeBox(n),Key(page),0},{}};}
+        const Box bounds=nodeBox(n);const bool y=double(bounds.maxY)-bounds.minY>double(bounds.maxX)-bounds.minX;
+        std::sort(n.rows.begin(),n.rows.begin()+n.count,[=](const Record& a,const Record& b){const auto x=center(a.box,y),v=center(b.box,y);return x!=v?x<v:a.key<b.key;});
+        SpatialNode other{};other.level=n.level;other.count=n.count-n.count/2;n.count/=2;
+        std::copy_n(n.rows.begin()+n.count,other.count,other.rows.begin());
+        const auto newPage=saveSpatial(0,other);saveSpatial(page,n);++stats_.compact.splits;
+        return {{nodeBox(n),Key(page),0},{nodeBox(other),Key(newPage),0}};
+    }
+    void addSpatial(Record row,Work& work) {
+        if(!spatialRoot_){SpatialNode n{};n.count=1;n.rows[0]=row;spatialRoot_=saveSpatial(0,n);return;}
+        const auto result=insertSpatial(spatialRoot_,row,work);
+        if(result.right.key){auto left=loadSpatial(spatialRoot_,work);SpatialNode root{};root.level=left.level+1;root.count=2;root.rows[0]=result.left;root.rows[1]=result.right;spatialRoot_=saveSpatial(0,root);}
+    }
+    // Search only branches enclosing the *previous* exact box. Each overlay
+    // entry retains that box even across repeated moves/delete/restore cycles.
+    // Worst-case overlap is bounded by a fixed work ceiling, not assumed log N.
+    bool eraseSpatial(uint64_t page,Key key,Box before,Work& work,Record& descriptor,int expected=-1) {
+        auto n=loadSpatial(page,work,expected);
+        size_t slot=0;
+        if(!n.level){
+            while(slot<n.count&&n.rows[slot].key!=key)++slot;
+            if(slot==n.count)return false;
+            if(n.rows[slot].box!=before)throw Failure::Invalid;
+            std::move(n.rows.begin()+slot+1,n.rows.begin()+n.count,n.rows.begin()+slot);--n.count;
+        }else{
+            bool found=false;
+            for(;slot<n.count;++slot){
+                if(!contains(n.rows[slot].box,before))continue;
+                Record child{};
+                if(!eraseSpatial(uint64_t(n.rows[slot].key),key,before,work,child,int(n.level)-1))continue;
+                found=true;
+                if(!child.key){std::move(n.rows.begin()+slot+1,n.rows.begin()+n.count,n.rows.begin()+slot);--n.count;}
+                else {
+                    n.rows[slot]=child;
+                    // Coalesce locally when an affected page and an adjacent
+                    // sibling fit in one page. Never scan the entire tree to
+                    // improve packing; the initial STR locality is retained.
+                    auto current=loadSpatial(uint64_t(child.key),work,int(n.level)-1);
+                    if(current.count<spatialFanout/2&&n.count>1){
+                        const size_t sibling=slot?slot-1:slot+1;
+                        auto other=loadSpatial(uint64_t(n.rows[sibling].key),work,int(n.level)-1);
+                        if(current.count+other.count<=spatialFanout){
+                            std::copy_n(other.rows.begin(),other.count,current.rows.begin()+current.count);current.count+=other.count;
+                            saveSpatial(uint64_t(child.key),current);n.rows[slot].box=nodeBox(current);
+                            file_.release(uint64_t(n.rows[sibling].key),other.level?SpatialBranch:SpatialLeaf);
+                            std::move(n.rows.begin()+sibling+1,n.rows.begin()+n.count,n.rows.begin()+sibling);--n.count;++stats_.compact.merges;
+                        }
+                    }
+                }
+                break;
+            }
+            if(!found)return false;
+        }
+        if(!n.count){file_.release(page,n.level?SpatialBranch:SpatialLeaf);descriptor={};}
+        else{saveSpatial(page,n);descriptor={nodeBox(n),Key(page),0};}
+        return true;
+    }
+    void removeSpatial(Key key,Box before,Work& work){
+        Record root{};if(!spatialRoot_||!eraseSpatial(spatialRoot_,key,before,work,root))throw Failure::Invalid;
+        spatialRoot_=uint64_t(root.key);
+        while(spatialRoot_){auto n=loadSpatial(spatialRoot_,work);if(!n.level||n.count!=1)break;
+            const auto old=spatialRoot_;spatialRoot_=uint64_t(n.rows[0].key);file_.release(old,SpatialBranch);++stats_.compact.merges;}
+    }
+    template<class Stop> bool compactOverlay(Stop& stop) noexcept {
+        auto& c=stats_.compact;++c.attempts;const auto start=Clock::now();Work work{};const auto writes=c.writes.load();
+        compactionContext_=&stop;compactionStop_=[](void* p){return (*static_cast<Stop*>(p))();};
+        bool success=false;
+        try{
+            if(!ready_||updating_)throw Failure::Invalid;
+            file_.beginSpatialBatch();
+            for(size_t i=0;i<overlayCount_;++i){if(stop())throw Failure::Cancelled;if(overlay_[i].basePresent)removeSpatial(overlay_[i].id,overlay_[i].baseBox,work);}
+            for(size_t i=0;i<overlayCount_;++i){if(stop())throw Failure::Cancelled;if(overlay_[i].present)addSpatial({overlay_[i].box,overlay_[i].id,0},work);}
+            file_.finishSpatialBatch(stop);
+            c.rows+=overlayCount_;overlayCount_=nodeCount_=0;stats_.overlayRows=stats_.overlayActive=0;stats_.baseRows=count_;
+            ++c.success;++stats_.compactions;success=true;
+        }catch(const Failure& f){updateFailed(f);++c.failed;}catch(...){updateFailed(Failure::Invalid);++c.failed;}
+        compactionStop_=nullptr;compactionContext_=nullptr;
+        c.visits+=work.pages;c.compactWrites+=c.writes.load()-writes;c.compactReads+=work.reads;c.compactHits+=work.hits;const auto ns=elapsed(start);c.ns+=ns;peak(c.maxNs,ns);return success;
     }
     auto findOverlay(Key id) noexcept {return std::lower_bound(overlay_.begin(),overlay_.begin()+overlayCount_,id,[](const Overlay& a,Key k){return a.id<k;});}
     const Overlay* overlay(Key id) const noexcept {
         auto end=overlay_.begin()+overlayCount_;auto it=std::lower_bound(overlay_.begin(),end,id,[](const Overlay& a,Key k){return a.id<k;});
         return it!=end&&it->id==id?&*it:nullptr;
     }
-    Overlay& touch(Key id) {
+    Overlay& touch(Key id, bool basePresent=false,Box baseBox={}) {
         if(id<=0) throw Failure::Invalid;
         auto it=findOverlay(id),end=overlay_.begin()+overlayCount_;
         if(it!=end&&it->id==id)return *it;
         if(overlayCount_==overlayLimit) throw Failure::OverlayFull;
-        std::move_backward(it,end,end+1);++overlayCount_;*it=Overlay{id};return *it;
+        std::move_backward(it,end,end+1);++overlayCount_;*it=Overlay{id,{},baseBox,false,basePresent};return *it;
     }
     uint16_t buildOverlay(size_t lo,size_t hi) noexcept {
         assert(lo<hi&&nodeCount_<nodes_.size());const auto i=uint16_t(nodeCount_++);
@@ -372,18 +530,19 @@ class Index {
         nodes_[i].left=buildOverlay(lo,mid);nodes_[i].right=buildOverlay(mid,hi);return i;
     }
     template<class Stop> static void poll(Work& w,Stop& stop) {if((++w.steps&127)==0&&stop()) throw Failure::Cancelled;}
-    template<class Stop> void queryPage(uint64_t id,Window win,std::span<Key> out,size_t& count,Work& w,Stop& stop) {
+    template<class Stop> void queryPage(uint64_t id,Window win,std::span<Key> out,size_t& count,Work& w,Stop& stop,int expectedLevel=-1) {
         poll(w,stop);++w.pages;
         const auto& p=file_.read(id,w);const auto kind=p.kind,n=p.count;
-        if(kind!=SpatialLeaf&&kind!=SpatialBranch) throw Failure::Invalid;
+        const auto level=int(p.parent);
+        if((kind!=SpatialLeaf&&kind!=SpatialBranch)||level<0||level>16||(expectedLevel>=0&&level!=expectedLevel)||(kind==SpatialLeaf)!=(level==0)) throw Failure::Invalid;
         // Cache slots can be replaced by a recursive read. Copy only the
         // bounded child records, never retain a cache pointer across descent.
         std::array<Record,spatialFanout> rows{};std::copy_n(p.entries.begin(),n,rows.begin());
         for(size_t i=0;i<n;++i) {
             poll(w,stop);++w.tests;const auto& r=rows[i];
-            if(!r.box.valid()||r.key<=0||(kind==SpatialBranch&&uint64_t(r.key)>=id)) throw Failure::Invalid;
+            if(!r.box.valid()||r.key<=0) throw Failure::Invalid;
             if(!win.hits(r.box)) continue;
-            if(kind==SpatialBranch)queryPage(uint64_t(r.key),win,out,count,w,stop);
+            if(kind==SpatialBranch)queryPage(uint64_t(r.key),win,out,count,w,stop,level-1);
             else if(overlay(r.key))++w.shadowed;
             else {if(count==out.size())throw Failure::Capacity;out[count++]=r.key;++w.candidates;}
         }
@@ -486,21 +645,23 @@ public:
         s.validationNs+=ns;peak(s.validationMaxNs,ns);
     }
     bool alreadyOverlay(Key id) const noexcept {return overlay(id)!=nullptr;}
-    bool reserveOverlay(size_t additional) noexcept {
-        if(additional>overlayLimit-overlayCount_){++stats_.order.overlayPreflight;updateFailed(Failure::OverlayFull);return false;}
-        return true;
+    template<class Stop> bool reserveOverlay(size_t additional,size_t total,Stop& stop) noexcept {
+        if(additional<=overlayLimit-overlayCount_)return true;
+        ++stats_.order.overlayPreflight;
+        if(total>overlayLimit)return false;
+        return compactOverlay(stop);
     }
     void beginUpdate() {
         if(!ready_||updating_)throw Failure::Invalid;
         updating_=true;updateStart_=Clock::now();updateWork_={};inserted_=removed_=0;++stats_.order.spliceAttempts;
     }
-    void replace(Key id,Box b) {
+    void replace(Key id,Box b,Box before) {
         if(!ready_||!updating_||!b.valid())throw Failure::Invalid;
-        auto& o=touch(id);o.box=b;o.present=true;
+        auto& o=touch(id,true,before);o.box=b;o.present=true;
     }
-    void remove(Key id) {
+    void remove(Key id,Box before) {
         if(!ready_||!updating_||!count_)throw Failure::Invalid;
-        auto& o=touch(id);o.present=false;
+        auto& o=touch(id,true,before);o.present=false;
         const auto rank=order_.rank(id,updateWork_,false);order_.remove(id,updateWork_);
         // Cached ranks are exact for this single-owner generation. A removal
         // changes only the ranks after the deleted position. Bound work by
@@ -512,7 +673,7 @@ public:
     }
     void insertAfter(Key prev,Key id,Box b) {
         if(!ready_||!updating_||!b.valid())throw Failure::Invalid;
-        auto& o=touch(id);o={id,b,true};
+        auto& o=touch(id);o.box=b;o.present=true;
         const auto rank=prev?order_.rank(prev,updateWork_,false)+1:1;order_.insertAfter(prev,id,updateWork_);
         uint64_t shifted=0;
         for(auto& c:rankCache_)if(c.id&&c.rank>=rank){++c.rank;++shifted;}

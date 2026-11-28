@@ -9,6 +9,7 @@
 #ifdef IP_REPLAY_TEST
 #include "tablet/session.hpp"
 extern "C" bool ipTestCodecReplay();
+extern "C" bool ipTestMoveBatch(int64_t,int64_t,double);
 extern "C" bool ipTestMiddleSplice(int64_t,int64_t,int);
 extern "C" void Java_com_infinipaint_demo_NativeBridge_suspend(JNIEnv*,jclass,jboolean);
 extern "C" jint Java_com_infinipaint_demo_NativeBridge_command(JNIEnv*,jclass,jint,jdoubleArray,jdouble);
@@ -23,7 +24,8 @@ extern "C" jint Java_com_infinipaint_demo_NativeBridge_command(JNIEnv*,jclass,ji
 #include <vector>
 #include <thread>
 #include <chrono>
-namespace engine::tablet {void hostStartPlanner();void hostForcePlannerFallback(bool);std::array<uint64_t,8> hostPlannerStats();std::array<uint64_t,39> hostSpatialStats();std::array<uint64_t,32> hostPaintOrderStats();std::array<uint64_t,5> hostSpatialFrameStats();void hostSpatialFault(int);}
+#include <cmath>
+namespace engine::tablet {void hostStartPlanner();void hostForcePlannerFallback(bool);std::array<uint64_t,8> hostPlannerStats();std::array<uint64_t,39> hostSpatialStats();std::array<uint64_t,32> hostPaintOrderStats();std::array<uint64_t,5> hostSpatialFrameStats();void hostSpatialFault(int);std::array<uint64_t,34> hostSpanStats();std::array<uint64_t,15> hostCompactionStats();}
 extern "C" jboolean Java_com_infinipaint_demo_NativeBridge_needsPublicationRetry(JNIEnv*,jclass);
 
 static int observedMax=-1;
@@ -439,6 +441,46 @@ void canonicalSpanPixelOracle(Pbuffer& pbuffer) {
     while(auto token=nextSave())check(acknowledge(token),"canonical fixture final save ack");
     std::printf("PASS: 4097-sample canonical chunk boundary, exact vertex bytes, %zu four-mode RGBA comparisons after context recreation\n",i);
 }
+void refinedSpanPixelOracle(Pbuffer& pbuffer) {
+    using namespace engine::document;using namespace engine::tablet;using namespace std::chrono_literals;
+    if(!planTest)return;
+    Java_com_infinipaint_demo_NativeBridge_suspend(nullptr,nullptr,true);
+    while(auto token=nextSave())check(acknowledge(token),"span fixture save ack");
+    auto doc=std::make_unique<Document>(Uuid{91});
+    for(int row=0;row<2;++row){Brush b;b.radiusWorld=2.5;b.rgba=row?std::array<float,4>{.2f,.8f,.3f,.55f}:std::array<float,4>{.8f,.1f,.5f,.65f};engine::input::RawInputStroke points;
+        for(int i=0;i<4097;++i)points.push_back({{double(-2048+i),31.+row*3+12*std::sin(double(i)/19)},1.+i*.003,float((i*17)%101)/100,0,0});
+        Value v{std::make_shared<const Ink>(std::move(points),b),0,0};check(doc->restore(row+1,row,v,1,1,1,2)==Status::Ok,"span fixture restore");}
+    check(doc->finishRestore(1,2)==Status::Ok&&doc->grant(3,100),"span fixture identity");check(stage(std::move(doc),96u<<20),"span fixture stage");activate(0,0,1);discard();Java_com_infinipaint_demo_NativeBridge_suspend(nullptr,nullptr,false);
+    const auto old=hostSpanStats();unsigned comparisons=0;std::vector<Frame> frames;
+    auto draw=[](int m){Java_com_infinipaint_demo_NativeBridge_render(nullptr,nullptr,m);glCheck("refined draw");Frame f{};glReadPixels(0,0,width,height,GL_RGBA,GL_UNSIGNED_BYTE,f.data());glCheck("refined RGBA");return f;};
+    for(int pass=0;pass<2;++pass){if(pass)pbuffer.recreate();for(int i=0;i<24;++i){double x=-1800+i*145.25,y=4.+(i%3)*2.5,z=i%12==0?.1:i%12==1?16.:i%4==0?.75:1.+(i%4)*.75;
+        if(z==16.)y=31.+12*std::sin((x+2048)/19)-2.;
+        Java_com_infinipaint_demo_NativeBridge_setCamera(nullptr,nullptr,x,y,z);
+        for(int m:{2,3}){hostForcePlannerFallback(true);Frame expected=draw(m);auto settle=std::chrono::steady_clock::now()+5s;while(Java_com_infinipaint_demo_NativeBridge_needsPublicationRetry(nullptr,nullptr)){check(std::chrono::steady_clock::now()<settle,"settle before reference");expected=draw(m);}hostForcePlannerFallback(false);auto count=hostSpanStats()[27];auto deadline=std::chrono::steady_clock::now()+8s;Frame actual{};
+            do{actual=draw(m);if(hostSpanStats()[27]>count)break;std::this_thread::sleep_for(1ms);}while(std::chrono::steady_clock::now()<deadline);
+            check(hostSpanStats()[27]>count,"actual span cut used");check(actual==expected,"refined span output differs from whole stroke");++comparisons;if(!pass)frames.push_back(actual);else check(actual==frames[comparisons-49],"refined context parity");}
+    }}
+    auto endStats=hostSpanStats();check(endStats[0]>old[0]&&endStats[11]>old[11]&&endStats[28]>old[28],"real span work and saved vertices");
+    std::printf("PASS: %u exact refined RGBA frames, actual span rows=%llu skipped_vertices=%llu builds=%llu queries=%llu\n",comparisons,(unsigned long long)(endStats[27]-old[27]),(unsigned long long)(endStats[28]-old[28]),(unsigned long long)(endStats[0]-old[0]),(unsigned long long)(endStats[11]-old[11]));
+    clear();while(auto token=nextSave())check(acknowledge(token),"span fixture final ack");
+}
+void compactedPixelOracle(const Pixel& background){
+    using namespace engine::document;using namespace engine::tablet;
+    if(!planTest)return;
+    Java_com_infinipaint_demo_NativeBridge_suspend(nullptr,nullptr,true);
+    auto save=[](){while(auto token=nextSave())check(acknowledge(token),"compaction fixture ack");};save();
+    auto doc=std::make_unique<Document>(Uuid{93});Brush brush;brush.radiusWorld=3;brush.rgba={.3f,.8f,.4f,.65f};
+    for(int i=1;i<=400;++i){engine::input::RawInputStroke rawPoint{{{double(i*32)+.5,100.5},1,.8f,0,0}};check(doc->restore(i,i-1,Value{std::make_shared<const Ink>(std::move(rawPoint),brush)},1,1,1,400)==Status::Ok,"compact restore");}
+    check(doc->finishRestore(1,400)==Status::Ok&&doc->grant(401,600),"compact identity");check(stage(std::move(doc),96u<<20),"compact stage");activate(0,0,1);discard();
+    Java_com_infinipaint_demo_NativeBridge_setCamera(nullptr,nullptr,0,0,1);auto blank=render(spline);check(at(blank,32,30)==background,"initial blank");auto before=hostSpatialStats();auto compact=hostCompactionStats();
+    check(ipTestMoveBatch(1,128,-70),"first compaction batch");auto moved=render(spline);check(rgbDelta(at(moved,32,30),background)>8,"moved visible witness");save();
+    check(ipTestMoveBatch(129,256,-70),"second compaction batch");check(render(spline)==moved,"offscreen batch leaves pixels");save();
+    check(ipTestMoveBatch(257,257,-70),"trigger compact");check(render(spline)==moved,"compacted pixels match");save();
+    check(hostCompactionStats()[1]==compact[1]+1&&hostSpatialStats()[7]==before[7],"actual localized compaction in planner, no rebuild");
+    for(int i=0;i<24;++i){Java_com_infinipaint_demo_NativeBridge_setCamera(nullptr,nullptr,i*347.,0,i%2?1.:.75);(void)render(spline);}
+    Java_com_infinipaint_demo_NativeBridge_setCamera(nullptr,nullptr,0,0,1);check(render(spline)==moved,"compaction round trip");
+    std::puts("PASS: production localized compaction after 257 moved records, exact viewport RGBA and visible witness, zero rebuilds");clear();save();Java_com_infinipaint_demo_NativeBridge_suspend(nullptr,nullptr,false);
+}
 void spatialPixelOracle(Pbuffer& pbuffer,const Pixel& background) {
     using namespace engine::document;
     using namespace engine::tablet;
@@ -684,6 +726,8 @@ int main() {
     Java_com_infinipaint_demo_NativeBridge_suspend(nullptr,nullptr,false);
     std::puts("PASS: v1 codec and reconstruction vertex bytes + 4-mode RGBA parity");
     canonicalSpanPixelOracle(pbuffer);
+    refinedSpanPixelOracle(pbuffer);
+    compactedPixelOracle(background);
     spatialPixelOracle(pbuffer,background);
 #endif
     clear();

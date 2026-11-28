@@ -1,3 +1,9 @@
+# M04 span access and localized compaction — host candidate, Package 1 incomplete
+
+[Implementation, measured results and explicit remaining requirements](M04_SPAN_STREAMING.md) · [Host evidence](M04_SPAN_STREAMING_HOST_RESULTS.txt). Actual per-record span page retrieval and resident vertex cuts plus localized coarse spatial compaction. Android pending; no claim of full global span streaming, independent canonical loading, bounded mesh residency or performance acceptance.
+
+---
+
 # M04 canonical span streaming — first slice, functionally verified
 
 [Implementation and acceptance](M04_CANONICAL_STREAM.md) · [Host results](M04_CANONICAL_STREAM_HOST_RESULTS.txt). Rolling v1 replay in production reconstruction and targeted revision-checked durable range reader. Android build, instrumentation and tablet acceptance passed. Direct viewport streaming, persistent span checkpoints and geometry residency remain open.

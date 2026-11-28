@@ -1,3 +1,7 @@
+## M04 span access and local compaction
+
+`bash diagnostics/run_m04_span_store.sh 48` checks real disk span-cache construction, direct seeks, spatial packet oracle, source identity, durable reopen, faults and scaling. `bash diagnostics/run_m04_spatial.sh stress` includes 42 seeded 1500-edit workloads plus compaction failure and scale tests. `IP_PLAN_TEST=1 NDK_HEADERS=... bash diagnostics/run_m02.sh pixels` verifies actual refined cut use and production compaction RGBA in both coverage modes. See [scope and evidence](../reports/M04_SPAN_STREAMING.md).
+
 ## M04 canonical span streaming
 
 On Linux with C++20 and JDK (set `JAVA_HOME` if needed): `sh diagnostics/run_m04_canonical_stream.sh stress` runs strict seeded oracle, allocation-disabled scale/faults and actual host JNI tests. `run_renderer_smoke.sh` exercises production reconstruction admission failure; `egl_ink_test.cpp` includes multi-chunk replay pixel/vertex parity. Android: `:app:connectedM03VerifyAndroidTest -Pandroid.testInstrumentationRunnerArguments.class=com.infinipaint.storage.CanonicalRangeTest` tests actual SQLite/JNI. Host tests do not substitute for Android instrumentation. [Evidence and scope](../reports/M04_CANONICAL_STREAM.md).

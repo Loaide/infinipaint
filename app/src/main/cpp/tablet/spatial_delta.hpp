@@ -7,8 +7,8 @@ namespace engine::tablet::spatial {
 // links before touching either access root. All surviving IDs must have the
 // same relative order after skipping removed/inserted runs. Large batches or
 // unsupported survivor reorder take the exact rebuild path.
-template<class Scene,class BoxOf>
-bool updateOrdered(Index& index,const Scene& old,const Scene& patch,Key oldHead,Key newHead,BoxOf boxOf) noexcept {
+template<class Scene,class BoxOf,class Stop=bool(*)()>
+bool updateOrdered(Index& index,const Scene& old,const Scene& patch,Key oldHead,Key newHead,BoxOf boxOf,Stop stop=+[]{return false;}) noexcept {
     if(!index.checkDelta(old.size(),patch.size()))return false;
     struct Classification {
         Index& index;Clock::time_point start=Clock::now();bool done=false;
@@ -57,18 +57,18 @@ bool updateOrdered(Index& index,const Scene& old,const Scene& patch,Key oldHead,
             const auto* r=finalRow(id);if(!r||oldRow(id)||!linked(id)||++tailSteps>patch.size())return false;
             tail=id;id=r->next;
         }
-        size_t added=0,removed=0,overlayNeeded=0;
+        size_t added=0,removed=0,overlayNeeded=0,totalTouched=0;
         for(const auto& [id,r]:patch){
             if(id<=0)return false;
             const auto* before=oldRow(id);
             if(!r.shape){
                 if(!before)continue; // coalesced absent tombstone
-                ++removed;if(!index.alreadyOverlay(id))++overlayNeeded;
+                ++removed;++totalTouched;if(!index.alreadyOverlay(id))++overlayNeeded;
                 if(!survivor(skipOld(before->prev,false))||!survivor(skipOld(before->next,true)))return false;
             }else{
                 if(!linked(id)||!boxOf(r).valid())return false;
-                if(before){if(!survivor(id))return false;if(boxOf(*before)!=boxOf(r)&&!index.alreadyOverlay(id))++overlayNeeded;}
-                else {++added;if(!index.alreadyOverlay(id))++overlayNeeded;}
+                if(before){if(!survivor(id))return false;if(boxOf(*before)!=boxOf(r)){++totalTouched;if(!index.alreadyOverlay(id))++overlayNeeded;}}
+                else {++added;++totalTouched;if(!index.alreadyOverlay(id))++overlayNeeded;}
             }
         }
         // A new run starts only at head or at a surviving predecessor. Each
@@ -88,11 +88,11 @@ bool updateOrdered(Index& index,const Scene& old,const Scene& patch,Key oldHead,
         if(visited!=added||removed>old.size()||bool(newHead)!=bool(old.size()-removed+added)||bool(tail)!=bool(newHead))return false;
         // All validation precedes mutations. Only the removed/new IDs change
         // the counted sequence; surviving neighbours are not relabelled.
-        classification.accept();if(!index.reserveOverlay(overlayNeeded))return false;
+        classification.accept();if(!index.reserveOverlay(overlayNeeded,totalTouched,stop))return false;
         index.beginUpdate();mutating=true;
         for(const auto& [id,r]:patch)if(const auto* before=oldRow(id)){
-            if(!r.shape)index.remove(id);
-            else if(boxOf(*before)!=boxOf(r))index.replace(id,boxOf(r));
+            if(!r.shape)index.remove(id,boxOf(*before));
+            else if(boxOf(*before)!=boxOf(r))index.replace(id,boxOf(r),boxOf(*before));
         }
         for(const auto& [id,r]:patch)if(r.shape&&!oldRow(id)&&(!r.prev||oldRow(r.prev))){
             Key prev=r.prev;
