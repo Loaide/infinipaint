@@ -351,8 +351,8 @@ namespace {
     int width = 1;
     int height = 1;
 
-    // First production spatial access slice. The worker owns ephemeral packed
-    // pages, a bounded edit BVH, and sparse paint ranks. The resident scene
+    // Worker-owned packed spatial pages, edit BVH, counted paint sequence and
+    // ID locator; only completed, compatible plans leave the worker. The resident scene
     // remains the validated authority and exact fallback until canonical
     // streaming and geometry residency are integrated.
     struct PlanStamp {
@@ -507,7 +507,7 @@ namespace {
                 drainRetired();
 #ifndef __ANDROID__
                 if(const int fault=testSpatialFault.exchange(0)) {
-                    if(index.ready()&&index.hasBase()) {if(fault==1)index.corruptSpatialRoot();else if(fault==2)index.truncatePages();else index.corruptOrderRoot();}
+                    if(index.ready()&&index.hasBase()) {if(fault==1)index.corruptSpatialRoot();else if(fault==2)index.truncatePages();else if(fault==4)index.corruptSequenceRoot();else index.corruptOrderRoot();}
                     haveLast=false;
                 }
 #endif
@@ -1808,6 +1808,22 @@ JNIEXPORT jint JNICALL Java_com_infinipaint_demo_NativeBridge_command(JNIEnv* en
 }
 
 #ifdef IP_REPLAY_TEST
+// Exercise the real edit observer/publication path with a middle splice.
+// Host-only fixture, not a new application operation or JNI interface.
+bool ipTestMiddleSplice(int64_t after,int64_t removedId,int variant) {
+    using namespace document;
+    if(!model||!suspended||!live.empty())return false;
+    Brush brush;brush.radiusWorld=3.5f;
+    brush.rgba=variant?std::array<float,4>{.1f,.8f,.2f,.5f}:std::array<float,4>{.95f,.8f,.1f,.65f};
+    input::RawInputStroke samples={{{-500.,26.5},1,.8f,0,0},{{40.5,25.5},2,.9f,0,0},{{600.,26.5},3,.7f,0,0}};
+    std::array<Edit,2> edits{{{Edit::Remove,removedId,{}},{Edit::InsertAfter,after,Value{std::make_shared<const Ink>(std::move(samples),brush)}}}};
+    sceneSink.worker=true;struct Reset{~Reset(){sceneSink.worker=false;}} reset;
+    const auto group=removedId?std::span<const Edit>(edits):std::span<const Edit>(edits).subspan(1);
+    const auto result=model->edit(model->revision(),group);
+    if(result!=Status::Ok)return false;
+    visibleRevision.store(model->revision());historyCharge.store(model->historyBytes());canonicalCharge.store(model->canonicalBytes());peak(queueHigh,saves.bytes());
+    return true;
+}
 // Single-threaded Mesa harness only. Cross the codec boundary, throw away old
 // derived meshes and require byte-identical vertex streams before pixel readback.
 bool ipTestCodecReplay() {
@@ -2372,6 +2388,11 @@ JNIEXPORT jlongArray JNICALL Java_com_infinipaint_demo_NativeBridge_spatialCount
     a[stats.size()+6]=planner.envelopeFrames.load();a[stats.size()+7]=planner.planIdsTested.load();a[stats.size()+8]=planner.residentFallbackRows.load();
     auto arr=env->NewLongArray(a.size());if(arr)env->SetLongArrayRegion(arr,0,a.size(),a.data());return arr;
 }
+JNIEXPORT jlongArray JNICALL Java_com_infinipaint_demo_NativeBridge_paintOrderCounters(JNIEnv* env,jclass) {
+    const auto stats=spatialStats.order.snapshot();std::array<jlong,stats.size()> a{};
+    std::copy(stats.begin(),stats.end(),a.begin());
+    auto arr=env->NewLongArray(a.size());if(arr)env->SetLongArrayRegion(arr,0,a.size(),a.data());return arr;
+}
 JNIEXPORT jlongArray JNICALL Java_com_infinipaint_demo_NativeBridge_spatialLatency(JNIEnv* env,jclass) {
     // Edges + histogram counts + exact max; cumulative successes only.
     constexpr auto edges=tablet::spatial::Stats::latencyEdges;
@@ -2407,6 +2428,7 @@ void hostStartPlanner(){planner.start();}
 void hostForcePlannerFallback(bool force){planner.testForceFallback=force;}
 std::array<uint64_t,8> hostPlannerStats(){return {planner.enabled.load(),planner.hits.load(),planner.fallbacks.load(),planner.built.load(),planner.cancelled.load(),planner.invalid.load(),planner.backpressure.load(),planner.retired.load()};}
 std::array<uint64_t,39> hostSpatialStats(){return spatialStats.snapshot();}
+std::array<uint64_t,32> hostPaintOrderStats(){return spatialStats.order.snapshot();}
 std::array<uint64_t,5> hostSpatialFrameStats(){return {planner.indexedFrames.load(),planner.linearFrames.load(),planner.envelopeFrames.load(),planner.planIdsTested.load(),planner.residentFallbackRows.load()};}
 void hostSpatialFault(int fault){planner.testSpatialFault.store(fault);planner.request();}
 void hostParkPlanner(){planner.testPark.store(true);planner.request();}

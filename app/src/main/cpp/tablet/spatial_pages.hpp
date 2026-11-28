@@ -46,7 +46,22 @@ inline void peak(std::atomic<uint64_t>& target,uint64_t v) noexcept {
 }
 using Clock=std::chrono::steady_clock;
 inline uint64_t elapsed(Clock::time_point t) noexcept {return uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now()-t).count());}
+struct OrderStats {
+    std::atomic<uint64_t> sequencePages{0},locatorPages{0},freePages{0},writes{0},writeBytes{0},reused{0};
+    std::atomic<uint64_t> splits{0},merges{0},borrows{0},rootCollapses{0},remaps{0};
+    std::atomic<uint64_t> spliceAttempts{0},spliceBatches{0},spliceFailures{0},inserted{0},removed{0};
+    std::atomic<uint64_t> spliceNs{0},spliceMaxNs{0},rankSteps{0},locatorSteps{0},maintenanceReads{0},maintenanceHits{0};
+    std::atomic<uint64_t> validationChecks{0},validationRejected{0},validationNs{0},validationMaxNs{0},largeBatches{0},noCompatibleBase{0},overlayPreflight{0};
+    std::atomic<uint64_t> rankCacheShifted{0},rankCacheDropped{0},rankCacheSeeded{0};
+    std::array<uint64_t,32> snapshot() const noexcept {
+        return {sequencePages.load(),locatorPages.load(),freePages.load(),writes.load(),writeBytes.load(),reused.load(),
+            splits.load(),merges.load(),borrows.load(),rootCollapses.load(),remaps.load(),spliceAttempts.load(),spliceBatches.load(),spliceFailures.load(),
+            inserted.load(),removed.load(),spliceNs.load(),spliceMaxNs.load(),rankSteps.load(),locatorSteps.load(),maintenanceReads.load(),maintenanceHits.load(),
+            validationChecks.load(),validationRejected.load(),validationNs.load(),validationMaxNs.load(),largeBatches.load(),noCompatibleBase.load(),overlayPreflight.load(),rankCacheShifted.load(),rankCacheDropped.load(),rankCacheSeeded.load()};
+    }
+};
 struct Stats {
+    OrderStats order;
     std::atomic<uint64_t> ready{0},baseRows{0},overlayRows{0},diskBytes{0},diskPeak{0},dynamicBytes{0},dynamicPeak{0};
     std::atomic<uint64_t> builds{0},incremental{0},queries{0},cancelled{0},fallbacks{0},ioFaults{0},invalid{0},capacity{0},compactions{0};
     std::atomic<uint64_t> reads{0},cacheHits{0},spatialPages{0},boundsTests{0},overlayNodes{0},shadowed{0},candidates{0},rankLookups{0};
@@ -106,27 +121,57 @@ template<class T> struct Alloc {
 };
 struct Record {Box box{};Key key=0;uint64_t value=0;};
 static_assert(sizeof(Record)==32);
-enum Kind : uint32_t { SpatialLeaf=1,SpatialBranch,OrderLeaf,OrderBranch };
+enum Kind : uint32_t { SpatialLeaf=1,SpatialBranch,SequenceLeaf,SequenceBranch,LocatorLeaf,LocatorBranch,FreePage };
+constexpr size_t sequenceFanout=128;
+inline bool sequenceKind(uint32_t k) noexcept {return k==SequenceLeaf||k==SequenceBranch;}
+inline bool locatorKind(uint32_t k) noexcept {return k==LocatorLeaf||k==LocatorBranch;}
+// Portable slicing-by-8 CRC32C. Scratch pages are never reopened across
+// generations. Checksum covers every byte except the checksum field itself.
+inline constexpr auto crcTables=[] {
+    std::array<std::array<uint32_t,256>,8> t{};
+    for(uint32_t i=0;i<256;++i){uint32_t c=i;for(int bit=0;bit<8;++bit)c=(c>>1)^((c&1)?0x82F63B78u:0u);t[0][i]=c;}
+    for(size_t j=1;j<t.size();++j)for(size_t i=0;i<256;++i){auto c=t[j-1][i];t[j][i]=(c>>8)^t[0][c&255];}
+    return t;
+}();
+inline uint32_t crcExtend(uint32_t c,const unsigned char* p,size_t n) noexcept {
+    while(n>=8){
+        c^=uint32_t(p[0])|(uint32_t(p[1])<<8)|(uint32_t(p[2])<<16)|(uint32_t(p[3])<<24);
+        c=crcTables[7][c&255]^crcTables[6][(c>>8)&255]^crcTables[5][(c>>16)&255]^crcTables[4][c>>24]^
+            crcTables[3][p[4]]^crcTables[2][p[5]]^crcTables[1][p[6]]^crcTables[0][p[7]];
+        p+=8;n-=8;
+    }
+    while(n--){c=(c>>8)^crcTables[0][(c^*p++)&255];}
+    return c;
+}
 struct Page {
     uint32_t magic=0x49505331,kind=0,count=0,checksum=0;
     std::array<Record,orderFanout> entries{};
-    std::array<unsigned char,pageBytes-16-sizeof(entries)> padding{};
+    uint64_t parent=0; // parent page, or next free page
+    std::array<unsigned char,pageBytes-24-sizeof(entries)> padding{};
     uint32_t digest() const noexcept {
-        // FNV-1a integrity check for ephemeral native-format scratch pages.
-        // Not an authentication mechanism, nor a claim of SQLite integrity.
-        const auto* p=reinterpret_cast<const unsigned char*>(this);uint32_t h=2166136261u;
-        for(size_t i=0;i<pageBytes;++i) if(i<12||i>=16) h=(h^p[i])*16777619u;
-        return h;
+        const auto* p=reinterpret_cast<const unsigned char*>(this);
+        return ~crcExtend(crcExtend(UINT32_MAX,p,12),p+16,pageBytes-16);
     }
-    bool valid() const noexcept {
-        return magic==0x49505331&&kind>=SpatialLeaf&&kind<=OrderBranch&&count>0&&
-            count<=(kind<=SpatialBranch?spatialFanout:orderFanout)&&checksum==digest();
+    bool structural() const noexcept {
+        if(magic!=0x49505331||kind<SpatialLeaf||kind>FreePage)return false;
+        if(kind==FreePage)return count==0;
+        if(!count||count>(kind<=SpatialBranch?spatialFanout:sequenceKind(kind)?sequenceFanout:orderFanout))return false;
+        if(kind>=SequenceLeaf)for(size_t i=0;i<count;++i){
+            const auto& r=entries[i];
+            if(r.key<=0||(kind==SequenceLeaf?r.value!=0:r.value==0))return false;
+            if(locatorKind(kind)&&i&&entries[i-1].key>=r.key)return false;
+        }
+        return true;
     }
+    bool valid() const noexcept {return structural()&&checksum==digest();}
 };
 static_assert(sizeof(Page)==pageBytes && offsetof(Page,entries)==16);
 class PageFile {
     Stats& stats_;
-    int fd_=-1;uint64_t pages_=0,clock_=0,limit_=diskLimit;
+    int fd_=-1;uint64_t pages_=0,clock_=0,limit_=diskLimit,free_=0;
+#ifndef __ANDROID__
+    int64_t failWrite_=-1;
+#endif
     struct Slot {uint64_t id=0,age=0;Page page;};
     std::array<Slot,cacheSlots> cache_{};
     static bool transfer(int fd,void* data,size_t bytes,off_t offset,bool writing) noexcept {
@@ -139,13 +184,32 @@ class PageFile {
         }
         return true;
     }
+    void store(uint64_t id,Page& p) {
+        if(!p.structural())throw Failure::Invalid;
+        p.checksum=p.digest();
+#ifndef __ANDROID__
+        if(failWrite_==0) {
+            // Write a real partial page, then report the injected failure.
+            (void)transfer(fd_,&p,32,off_t((id-1)*pageBytes),true);
+            throw Failure::Io;
+        }
+        if(failWrite_>0)--failWrite_;
+#endif
+        if(!transfer(fd_,&p,sizeof(p),off_t((id-1)*pageBytes),true)) throw Failure::Io;
+        if(p.kind>=SequenceLeaf){++stats_.order.writes;stats_.order.writeBytes+=pageBytes;}
+        for(auto& slot:cache_)if(slot.id==id){slot.page=p;slot.age=++clock_;break;}
+    }
 public:
     explicit PageFile(Stats& s,uint64_t limit=diskLimit):stats_(s),limit_(limit){}
     ~PageFile(){reset();}
     PageFile(const PageFile&)=delete;PageFile& operator=(const PageFile&)=delete;
     void reset() noexcept {
         if(fd_>=0) ::close(fd_);
-        fd_=-1;pages_=clock_=0;stats_.diskBytes=0;
+        fd_=-1;pages_=clock_=free_=0;stats_.diskBytes=0;
+        stats_.order.sequencePages=stats_.order.locatorPages=stats_.order.freePages=0;
+#ifndef __ANDROID__
+        failWrite_=-1;
+#endif
         for(auto& s:cache_) {s.id=0;s.age=0;}
     }
     void create(const char* directory,uint64_t required) {
@@ -165,12 +229,33 @@ public:
     }
     uint64_t write(Page& p) {
         if(fd_<0) throw Failure::Io;
-        if(pages_>=limit_/pageBytes) throw Failure::Capacity;
-        p.checksum=p.digest();
-        const auto end=(pages_+1)*pageBytes;
-        stats_.diskBytes=end;peak(stats_.diskPeak,end); // reserve before write
-        if(!transfer(fd_,&p,sizeof(p),off_t(pages_*pageBytes),true)) throw Failure::Io;
-        return ++pages_;
+        if(p.kind==FreePage)throw Failure::Invalid;
+        uint64_t id;
+        if(free_ && p.kind>=SequenceLeaf) {
+            Work w;id=free_;const auto& old=read(id,w);
+            if(old.kind!=FreePage||old.parent==id||old.parent>pages_)throw Failure::Invalid;
+            free_=old.parent;--stats_.order.freePages;++stats_.order.reused;
+            stats_.order.maintenanceReads+=w.reads;stats_.order.maintenanceHits+=w.hits;
+        }else{
+            if(pages_>=limit_/pageBytes) throw Failure::Capacity;
+            id=++pages_;
+            const auto end=pages_*pageBytes;
+            stats_.diskBytes=end;peak(stats_.diskPeak,end); // reserve before write
+        }
+        store(id,p);
+        if(sequenceKind(p.kind))++stats_.order.sequencePages;
+        if(locatorKind(p.kind))++stats_.order.locatorPages;
+        return id;
+    }
+    void overwrite(uint64_t id,Page& p) {
+        if(!id||id>pages_||fd_<0||p.kind<SequenceLeaf||p.kind==FreePage)throw Failure::Invalid;
+        store(id,p);
+    }
+    void release(uint64_t id,uint32_t kind) {
+        if(!id||id>pages_||fd_<0||(!sequenceKind(kind)&&!locatorKind(kind)))throw Failure::Invalid;
+        Page p{};p.kind=FreePage;p.parent=free_;store(id,p);free_=id;
+        if(sequenceKind(kind))--stats_.order.sequencePages;else --stats_.order.locatorPages;
+        ++stats_.order.freePages;
     }
     const Page& read(uint64_t id,Work& work) {
         if(!id||id>pages_||fd_<0) throw Failure::Invalid;
@@ -186,6 +271,9 @@ public:
         victim->id=id;victim->age=++clock_;return victim->page;
     }
 #ifndef __ANDROID__
+    uint64_t pageCount()const noexcept{return pages_;}
+    uint64_t freeHead()const noexcept{return free_;}
+    void failWritesAfter(int64_t n){failWrite_=n;}
     void corrupt(uint64_t id) {assert(fd_>=0&&id&&id<=pages_);unsigned char b=0xFF;
         if(!transfer(fd_,&b,1,off_t((id-1)*pageBytes),true)) throw Failure::Io;
         for(auto& s:cache_)s.id=0;
@@ -193,26 +281,34 @@ public:
     void truncate() {assert(fd_>=0);if(::ftruncate(fd_,0)!=0)throw Failure::Io;for(auto& s:cache_)s.id=0;}
 #endif
 };
+}
+#include "counted_order.hpp"
+namespace engine::tablet::spatial {
 // All mutable operations and I/O are performed by the single planner owner.
 // An invalidation discards both access roots; no partial index is queryable.
 class Index {
-    struct Overlay {Key id=0;Box box{};uint64_t rank=0;bool present=false;};
+    struct Overlay {Key id=0;Box box{};bool present=false;};
     struct Node {Box box{};uint16_t left=0,right=0,entry=0;bool leaf=false;};
-    struct Ranked {Key id;uint64_t rank;};
+    struct Ranked {Key id;uint64_t rank;uint64_t leaf=0;};
+    struct RankCache {Key id;uint64_t rank;};
     Stats& stats_;
     Budget budget_;
     PageFile file_;
     uint64_t diskLimit_;
-    uint64_t spatialRoot_=0,orderRoot_=0,maxRank_=0;
+    uint64_t spatialRoot_=0;
+    CountedOrder order_;
+    Work updateWork_{};
+    Clock::time_point updateStart_{};
+    uint64_t inserted_=0,removed_=0;bool updating_=false;
     size_t count_=0,overlayCount_=0,nodeCount_=0;
     Key tail_=0;
     bool ready_=false;
     std::array<Overlay,overlayLimit> overlay_{};
     std::array<uint16_t,overlayLimit> overlayOrder_{};
     std::array<Node,2*overlayLimit> nodes_{};
-    // Small generation-local direct-mapped cache. It never contains new
-    // overlay ranks, and is cleared on every base root replacement/fault.
-    std::array<Ranked,rankCacheSlots> rankCache_{};
+    // Small generation-local direct-mapped rank cache. Repair positions after
+    // each validated splice; clear on any generation replacement or fault.
+    std::array<RankCache,rankCacheSlots> rankCache_{};
     std::vector<Ranked,Alloc<Ranked>> ranked_;
     using Records=std::vector<Record,Alloc<Record>>;
     static uint64_t pagesFor(size_t n,size_t fanout) noexcept {
@@ -226,28 +322,28 @@ class Index {
         std::sort(rows.begin(),rows.end(),cmp(false));
         for(size_t i=0;i<rows.size();i+=stripe) std::sort(rows.begin()+i,rows.begin()+std::min(i+stripe,rows.size()),cmp(true));
     }
-    template<class Stop> uint64_t buildTree(Records& rows,bool spatial,Stop&& stop) {
+    template<class Stop> uint64_t buildTree(Records& rows,Stop&& stop) {
         if(rows.empty()) return 0;
-        const size_t fanout=spatial?spatialFanout:orderFanout;
+        const size_t fanout=spatialFanout;
         bool leaf=true;
         while(true) {
             if(stop()) throw Failure::Cancelled;
-            if(spatial) pack(rows);
+            pack(rows);
             // Order rows are key-sorted at leaf creation. Branch max keys
             // preserve that order without any per-level rank recomputation.
             Records parents{Alloc<Record>(budget_)};
             parents.reserve((rows.size()-1)/fanout+1);
             for(size_t i=0;i<rows.size();i+=fanout) {
                 if(stop()) throw Failure::Cancelled;
-                Page p{};p.kind=spatial?(leaf?SpatialLeaf:SpatialBranch):(leaf?OrderLeaf:OrderBranch);
+                Page p{};p.kind=leaf?SpatialLeaf:SpatialBranch;
                 p.count=uint32_t(std::min(fanout,rows.size()-i));
                 std::copy_n(rows.begin()+i,p.count,p.entries.begin());
                 Box box=p.entries[0].box;
-                if(spatial) for(size_t j=1;j<p.count;++j) box=cover(box,p.entries[j].box);
+                for(size_t j=1;j<p.count;++j) box=cover(box,p.entries[j].box);
                 const auto page=file_.write(p);
-                parents.push_back(spatial?Record{box,Key(page),0}:Record{{},p.entries[p.count-1].key,page});
+                parents.push_back({box,Key(page),0});
             }
-            if(parents.size()==1) return spatial?uint64_t(parents[0].key):parents[0].value;
+            if(parents.size()==1) return uint64_t(parents[0].key);
             rows.swap(parents);leaf=false;
         }
     }
@@ -298,24 +394,43 @@ class Index {
         if(n.leaf) {if(count==out.size())throw Failure::Capacity;out[count++]=overlay_[n.entry].id;++w.candidates;}
         else {queryOverlay(n.left,win,out,count,w,stop);queryOverlay(n.right,win,out,count,w,stop);}
     }
-    template<class Stop> uint64_t rank(Key key,Work& w,Stop& stop) {
-        ++w.ranks;
-        if(const auto* o=overlay(key)) {if(!o->present)throw Failure::Invalid;if(o->rank)return o->rank;}
-        const auto slot=(uint64_t(key)*11400714819323198485ull)>>(64-12);
-        auto& cached=rankCache_[slot];
-        if(cached.id==key){++w.rankHits;return cached.rank;}
-        auto id=orderRoot_;
-        while(id) {
-            poll(w,stop);const auto& p=file_.read(id,w);
-            if(p.kind!=OrderLeaf&&p.kind!=OrderBranch)throw Failure::Invalid;
-            const auto end=p.entries.begin()+p.count;
-            auto it=std::lower_bound(p.entries.begin(),end,key,[](const Record& r,Key k){return r.key<k;});
-            if(it==end)throw Failure::Invalid;
-            if(p.kind==OrderLeaf) {if(it->key!=key||!it->value||it->value>maxRank_)throw Failure::Invalid;cached={key,it->value};return it->value;}
-            if(!it->value||it->value>=id)throw Failure::Invalid;
-            id=it->value;
+    RankCache& cachedRank(Key key) noexcept {
+        return rankCache_[(uint64_t(key)*11400714819323198485ull)>>(64-12)];
+    }
+    template<class Stop> void rankCandidates(std::span<Key> ids,Work& w,Stop& stop) {
+        // First resolve missing keys in ID order, reusing locator pages.
+        bool missing=false;
+        for(size_t i=0;i<ids.size();++i){
+            poll(w,stop);const auto key=ids[i];++w.ranks;
+            if(i&&key==ids[i-1])throw Failure::Invalid;
+            if(const auto* o=overlay(key))if(!o->present)throw Failure::Invalid;
+            auto& c=cachedRank(key);
+            if(c.id==key){++w.rankHits;ranked_.push_back({key,c.rank,0});}
+            else {missing=true;ranked_.push_back({key,0,order_.leafFor(key,w)}); }
         }
-        throw Failure::Invalid;
+        // Rank once per sequence leaf. The leaf's ancestor counts supply the
+        // prefix, its resident slots supply the exact within-leaf order.
+        if(!missing)return;
+        std::sort(ranked_.begin(),ranked_.end(),[](const Ranked& a,const Ranked& b){return a.leaf<b.leaf;});
+        for(size_t i=0;i<ranked_.size();){
+            if(!ranked_[i].leaf){++i;continue;}
+            poll(w,stop);const auto leaf=ranked_[i].leaf;
+            const auto positions=order_.leafRanks(leaf,w);
+            do{
+                const auto id=ranked_[i].id;
+                auto at=std::find(positions.ids.begin(),positions.ids.begin()+positions.count,id);
+                if(at==positions.ids.begin()+positions.count)throw Failure::Invalid;
+                const auto r=positions.prefix+uint64_t(at-positions.ids.begin())+1;
+                ranked_[i].rank=r;cachedRank(id)={id,r};++i;
+            }while(i<ranked_.size()&&ranked_[i].leaf==leaf);
+        }
+    }
+    void endUpdate(bool ok) noexcept {
+        if(!updating_)return;
+        updating_=false;auto& s=stats_.order;
+        s.maintenanceReads+=updateWork_.reads;s.maintenanceHits+=updateWork_.hits;
+        const auto ns=elapsed(updateStart_);s.spliceNs+=ns;peak(s.spliceMaxNs,ns);
+        if(ok){++s.spliceBatches;s.inserted+=inserted_;s.removed+=removed_;}else ++s.spliceFailures;
     }
     void failure(Failure f) noexcept {
         switch(f){case Failure::Capacity:++stats_.capacity;break;case Failure::Io:++stats_.ioFaults;break;case Failure::Invalid:++stats_.invalid;break;case Failure::Cancelled:++stats_.cancelled;break;case Failure::OverlayFull:++stats_.compactions;break;}
@@ -323,7 +438,7 @@ class Index {
 public:
     enum class Result { Ok,Unavailable,Cancelled,Overflow };
     explicit Index(Stats& stats,bool(*admits)(size_t)=nullptr,uint64_t ram=ramLimit,uint64_t disk=diskLimit):
-        stats_(stats),budget_{stats,admits,ram},file_(stats,disk),diskLimit_(disk),ranked_(Alloc<Ranked>(budget_)){}
+        stats_(stats),budget_{stats,admits,ram},file_(stats,std::min(disk,diskLimit)),diskLimit_(std::min(disk,diskLimit)),order_(file_,budget_,stats.order),ranked_(Alloc<Ranked>(budget_)){}
     ~Index(){reset();}
     Index(const Index&)=delete;Index& operator=(const Index&)=delete;
     bool ready() const noexcept {return ready_;}
@@ -332,7 +447,7 @@ public:
     void reset() noexcept {
         ready_=false;stats_.ready=stats_.baseRows=stats_.overlayRows=stats_.overlayActive=0;
         rankCache_.fill({});
-        file_.reset();spatialRoot_=orderRoot_=maxRank_=0;count_=overlayCount_=nodeCount_=0;tail_=0;
+        endUpdate(false);order_.reset();file_.reset();spatialRoot_=0;count_=overlayCount_=nodeCount_=0;tail_=0;
         {std::vector<Ranked,Alloc<Ranked>> empty{Alloc<Ranked>(budget_)};ranked_.swap(empty);}
     }
     // enumerate(emit) must emit the entire validated link sequence once, with
@@ -340,48 +455,80 @@ public:
     template<class Enumerate,class Stop> bool rebuild(const char* directory,size_t count,Enumerate&& enumerate,Stop&& stop) noexcept {
         const auto start=Clock::now();++stats_.buildAttempts;reset();
         try {
-            if(count>diskLimit_/pageBytes*orderFanout||pagesFor(count,spatialFanout)+pagesFor(count,orderFanout)>diskLimit_/pageBytes)throw Failure::Capacity;
+            const auto pages=pagesFor(count,spatialFanout)+pagesFor(count,sequenceFanout)+pagesFor(count,orderFanout);
+            if(count>diskLimit_/pageBytes*orderFanout||pages>diskLimit_/pageBytes)throw Failure::Capacity;
+            file_.create(directory,pages*pageBytes);
             if(count) {
                 Records spatial{Alloc<Record>(budget_)},order{Alloc<Record>(budget_)};
                 spatial.reserve(count);order.reserve(count);
                 if(!enumerate([&](Key id,Box box){
                     if(id<=0||!box.valid()||spatial.size()>=count)throw Failure::Invalid;
                     if((spatial.size()&127)==0&&stop())throw Failure::Cancelled;
-                    spatial.push_back({box,id,0});order.push_back({{},id,spatial.size()});tail_=id;
+                    spatial.push_back({box,id,0});order.push_back({{},id,0});tail_=id;
                 })||spatial.size()!=count)throw Failure::Invalid;
-                std::sort(order.begin(),order.end(),[](const Record& a,const Record& b){return a.key<b.key;});
-                if(std::adjacent_find(order.begin(),order.end(),[](const Record& a,const Record& b){return a.key==b.key;})!=order.end())throw Failure::Invalid;
-                file_.create(directory,(pagesFor(count,spatialFanout)+pagesFor(count,orderFanout))*pageBytes);spatialRoot_=buildTree(spatial,true,stop);orderRoot_=buildTree(order,false,stop);
-            }
+                spatialRoot_=buildTree(spatial,stop);
+                order_.build(order,stop);
+            }else if(!enumerate([](Key,Box){throw Failure::Invalid;}))throw Failure::Invalid;
             if(stop())throw Failure::Cancelled;
-            count_=maxRank_=count;ready_=true;stats_.baseRows=count;stats_.ready=1;++stats_.builds;
+            count_=count;ready_=true;stats_.baseRows=count;stats_.ready=1;++stats_.builds;
         }catch(const Failure& f){failure(f);reset();}catch(const std::bad_alloc&){failure(Failure::Capacity);reset();}catch(...){failure(Failure::Invalid);reset();}
         const auto ns=elapsed(start);stats_.buildNs+=ns;peak(stats_.buildMaxNs,ns);return ready_;
     }
-    // Called only after the caller verifies the new sequence is the old
-    // sequence minus deletions plus an append-only suffix. Middle splices
-    // require a fresh pair of roots in this transitional access service.
+    // Only called by the validated splice adapter. While mutating, no query
+    // runs on the sole planner owner. Failure discards the entire generation.
+    bool checkDelta(size_t oldCount,size_t patchCount) noexcept {
+        if(!ready_||count_!=oldCount){++stats_.order.noCompatibleBase;return false;}
+        if(patchCount>3*overlayLimit+2){++stats_.order.largeBatches;return false;}
+        return true;
+    }
+    void classified(bool accepted,uint64_t ns) noexcept {
+        auto& s=stats_.order;++s.validationChecks;if(!accepted)++s.validationRejected;
+        s.validationNs+=ns;peak(s.validationMaxNs,ns);
+    }
+    bool alreadyOverlay(Key id) const noexcept {return overlay(id)!=nullptr;}
+    bool reserveOverlay(size_t additional) noexcept {
+        if(additional>overlayLimit-overlayCount_){++stats_.order.overlayPreflight;updateFailed(Failure::OverlayFull);return false;}
+        return true;
+    }
+    void beginUpdate() {
+        if(!ready_||updating_)throw Failure::Invalid;
+        updating_=true;updateStart_=Clock::now();updateWork_={};inserted_=removed_=0;++stats_.order.spliceAttempts;
+    }
     void replace(Key id,Box b) {
-        if(!ready_||!b.valid())throw Failure::Invalid;
+        if(!ready_||!updating_||!b.valid())throw Failure::Invalid;
         auto& o=touch(id);o.box=b;o.present=true;
     }
     void remove(Key id) {
-        if(!ready_||!count_)throw Failure::Invalid;
-        auto& o=touch(id);o.present=false;o.rank=0;--count_;
+        if(!ready_||!updating_||!count_)throw Failure::Invalid;
+        auto& o=touch(id);o.present=false;
+        const auto rank=order_.rank(id,updateWork_,false);order_.remove(id,updateWork_);
+        // Cached ranks are exact for this single-owner generation. A removal
+        // changes only the ranks after the deleted position. Bound work by
+        // the fixed cache, not by document cardinality.
+        uint64_t shifted=0,dropped=0;
+        for(auto& c:rankCache_)if(c.id){if(c.id==id){c={};++dropped;}else if(c.rank>rank){--c.rank;++shifted;}}
+        stats_.order.rankCacheShifted+=shifted;stats_.order.rankCacheDropped+=dropped;
+        --count_;++removed_;
     }
-    void append(Key id,Box b) {
-        if(!ready_||!b.valid()||maxRank_==UINT64_MAX)throw Failure::Invalid;
-        auto& o=touch(id);o={id,b,++maxRank_,true};++count_;tail_=id;
+    void insertAfter(Key prev,Key id,Box b) {
+        if(!ready_||!updating_||!b.valid())throw Failure::Invalid;
+        auto& o=touch(id);o={id,b,true};
+        const auto rank=prev?order_.rank(prev,updateWork_,false)+1:1;order_.insertAfter(prev,id,updateWork_);
+        uint64_t shifted=0;
+        for(auto& c:rankCache_)if(c.id&&c.rank>=rank){++c.rank;++shifted;}
+        stats_.order.rankCacheShifted+=shifted;cachedRank(id)={id,rank};++stats_.order.rankCacheSeeded;
+        ++count_;++inserted_;
     }
-    void finishUpdate(Key tail) noexcept {
-        assert(ready_);tail_=tail;size_t active=0;nodeCount_=0;
+    void finishUpdate(Key tail) {
+        if(!ready_||!updating_||count_!=order_.count()||bool(count_)!=bool(tail))throw Failure::Invalid;
+        tail_=tail;size_t active=0;nodeCount_=0;
         for(size_t i=0;i<overlayCount_;++i)if(overlay_[i].present)overlayOrder_[active++]=uint16_t(i);
         if(active)buildOverlay(0,active);
-        stats_.overlayRows=overlayCount_;stats_.overlayActive=active;++stats_.incremental;
+        stats_.overlayRows=overlayCount_;stats_.overlayActive=active;++stats_.incremental;endUpdate(true);
     }
     void updateFailed(Failure f) noexcept {failure(f);reset();}
     template<class Stop> Result query(Window win,std::span<Key> out,size_t& count,Stop&& stop) noexcept {
-        count=0;if(!ready_||!win.valid()){++stats_.fallbacks;return Result::Unavailable;}
+        count=0;if(!ready_||updating_||!win.valid()){++stats_.fallbacks;return Result::Unavailable;}
         ++stats_.queryAttempts;const auto start=Clock::now();auto phase=start;Work w;uint64_t spatialTime=0,orderTime=0;bool orderPhase=false;
         Result result=Result::Unavailable;
         try {
@@ -393,7 +540,7 @@ public:
             // Batch rank lookups in ID order to reuse adjacent leaf pages;
             // the final ordering is by exact paint rank, never by spatial ID.
             std::sort(out.begin(),out.begin()+count);
-            for(size_t i=0;i<count;++i){if(i&&out[i]==out[i-1])throw Failure::Invalid;ranked_.push_back({out[i],rank(out[i],w,stop)});}
+            rankCandidates(out.first(count),w,stop);
             std::sort(ranked_.begin(),ranked_.end(),[](const Ranked& a,const Ranked& b){return a.rank<b.rank;});
             for(size_t i=0;i<count;++i){poll(w,stop);if(i&&ranked_[i-1].rank==ranked_[i].rank)throw Failure::Invalid;out[i]=ranked_[i].id;}
             if(stop())throw Failure::Cancelled;
@@ -412,7 +559,9 @@ public:
 #ifndef __ANDROID__
     bool hasBase()const noexcept{return spatialRoot_!=0;}
     void corruptSpatialRoot(){file_.corrupt(spatialRoot_);}
-    void corruptOrderRoot(){rankCache_.fill({});file_.corrupt(orderRoot_);}
+    void corruptOrderRoot(){rankCache_.fill({});file_.corrupt(order_.locatorRoot());}
+    void corruptSequenceRoot(){rankCache_.fill({});file_.corrupt(order_.sequenceRoot());}
+    void failWritesAfter(int64_t n){file_.failWritesAfter(n);}
     void truncatePages(){file_.truncate();}
 #endif
 };

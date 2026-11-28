@@ -1,3 +1,7 @@
+## Current M04 increment — counted paint ordering (functionally verified)
+
+Baseline `bdcc417f5b0d66716986d89833446ea4b9d82a4f`. [Production counted B+ sequence and locator](../reports/M04_COUNTED_ORDER.md) replace absolute rank pages. Valid bounded middle splices no longer force a rebuild; paired spatial overlay compaction, canonical streaming, residency and full engine gates remain open. Final host suites passed; Android build and 10/10 tablet checks passed.
+
 ## Current M04 increment — spatial access (functionally verified)
 
 Baseline `107b6fb6c1de2535afe8eebda3d8f5d64a3b73b6` includes functionally verified M04.3-C. [First production spatial access slice](../reports/M04_SPATIAL_ACCESS.md) implements ephemeral packed pages, bounded BVH overlay and sparse paint-rank lookup in the existing planner. Host tests, Android build and 12/12 tablet checks passed. Canonical/mesh streaming, counted sequence tree, certified LOD, residency and Vulkan cutover remain open.

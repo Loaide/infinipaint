@@ -1,3 +1,7 @@
+# Current handoff — M04 counted B+ paint ordering
+
+Inspected `bdcc417f5b0d66716986d89833446ea4b9d82a4f`, branch `feature/m04-scalable-renderer`. [Scope, tests and acceptance](../reports/M04_COUNTED_ORDER.md). Counted sequence and ID locator integrated in existing planner, with bounded validated splices and exact rendering. Final host tests, Android build and tablet acceptance passed. Next: canonical curve-span streaming. Preserve known resident mesh limit and later canonical streaming/residency obligations. No Vulkan cutover or backend rerun.
+
 # Current handoff — M04 production spatial access
 
 Inspected owner archive `107b6fb6c1de2535afe8eebda3d8f5d64a3b73b6`, branch `feature/m04-scalable-renderer`. [Scope, telemetry and acceptance](../reports/M04_SPATIAL_ACCESS.md). New derived index and rank pages are integrated in the production resident planner; strict host tests passed. Android build and tablet acceptance passed. Next: counted paint ordering and canonical streaming. No backend rerun. Do not treat whole-stroke page lookup as completed canonical/geometry streaming or change approved architecture. Previous M04.3 handoff follows.

@@ -1,3 +1,9 @@
+# M04 counted B+ paint ordering — functionally verified
+
+[Implementation, measured evidence and Android acceptance](M04_COUNTED_ORDER.md) · [Host output](M04_COUNTED_ORDER_HOST_RESULTS.txt). Counted order and locator replace fixed rank tree in production planner. Spatial overlay compaction and canonical/mesh streaming remain open.
+
+---
+
 # M04 production spatial access — first increment, functionally verified
 
 [Implementation, rigorous tests and completed tablet acceptance](M04_SPATIAL_ACCESS.md). The prior resident renderer remains exact fallback; canonical/geometry streaming and full counted paint-order tree remain open. No Vulkan cutover.

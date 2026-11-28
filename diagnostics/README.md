@@ -52,3 +52,7 @@ The Android diagnostic test is not the production InfinitePaper/InfiniPaint engi
 ## M04 production spatial access
 
 Run `sh diagnostics/run_m04_spatial.sh stress` on a POSIX C++20 host. Default runs the ordered oracle, fault/overflow suite and fixed-visible-count scale test; stress adds 12 seeds. For production bridge and pixel integration use the existing renderer smoke and M02 pixel recipes with `IP_PLAN_TEST=1` for indexed-vs-exact comparisons. See [scope and telemetry](../reports/M04_SPATIAL_ACCESS.md).
+
+## M04 counted paint-order tree
+
+Run `sh diagnostics/run_m04_counted_order.sh stress` on a POSIX C++20 host (LF scripts). It exercises structural audits, arbitrary splices, partial writes, capacity, page reuse, sparse-rank scaling and seeded stress; retain existing `run_m04_spatial.sh stress`, renderer smoke and both `IP_PLAN_TEST=1` Mesa branches. See [telemetry and scope](../reports/M04_COUNTED_ORDER.md).

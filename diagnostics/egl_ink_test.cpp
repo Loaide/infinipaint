@@ -9,6 +9,7 @@
 #ifdef IP_REPLAY_TEST
 #include "tablet/session.hpp"
 extern "C" bool ipTestCodecReplay();
+extern "C" bool ipTestMiddleSplice(int64_t,int64_t,int);
 extern "C" void Java_com_infinipaint_demo_NativeBridge_suspend(JNIEnv*,jclass,jboolean);
 extern "C" jint Java_com_infinipaint_demo_NativeBridge_command(JNIEnv*,jclass,jint,jdoubleArray,jdouble);
 #endif
@@ -22,7 +23,7 @@ extern "C" jint Java_com_infinipaint_demo_NativeBridge_command(JNIEnv*,jclass,ji
 #include <vector>
 #include <thread>
 #include <chrono>
-namespace engine::tablet {void hostStartPlanner();void hostForcePlannerFallback(bool);std::array<uint64_t,8> hostPlannerStats();std::array<uint64_t,39> hostSpatialStats();std::array<uint64_t,5> hostSpatialFrameStats();void hostSpatialFault(int);}
+namespace engine::tablet {void hostStartPlanner();void hostForcePlannerFallback(bool);std::array<uint64_t,8> hostPlannerStats();std::array<uint64_t,39> hostSpatialStats();std::array<uint64_t,32> hostPaintOrderStats();std::array<uint64_t,5> hostSpatialFrameStats();void hostSpatialFault(int);}
 extern "C" jboolean Java_com_infinipaint_demo_NativeBridge_needsPublicationRetry(JNIEnv*,jclass);
 
 static int observedMax=-1;
@@ -491,10 +492,41 @@ void spatialPixelOracle(Pbuffer& pbuffer,const Pixel& background) {
     check(render(spline)==switched,"undo removes overlay without stale pixels");
     check(Java_com_infinipaint_demo_NativeBridge_command(nullptr,nullptr,2,nullptr,0)==0,"spatial redo");
     check(render(spline)==appended&&hostSpatialStats()[7]==beforeAppend[7],"redo restores exact overlay order without rebuilding base");
+    // Insert/remove in the middle of overlapping translucent ink. Check
+    // every revision against the exact resident renderer and insist that the
+    // counted order path handles the splices without rebuilding both roots.
+    // This host fixture has no SQLite writer. Acknowledge the simulated
+    // queue between edit rounds; the test is about ordering, not queue fill.
+    auto drainSaves=[](){while(auto token=nextSave())check(acknowledge(token),"host simulated save acknowledgement");};
+    drainSaves();
+    const auto beforeMiddle=hostSpatialStats();const auto orderBefore=hostPaintOrderStats();
+    check(ipTestMiddleSplice(1,128,0),"canonical middle replace splice");
+    auto middle=render(spline);check(middle!=appended,"middle splice has a visible witness");
+    const auto orderAfter=hostPaintOrderStats();
+    check(hostSpatialStats()[7]==beforeMiddle[7]&&orderAfter[14]>orderBefore[14]&&orderAfter[15]>orderBefore[15],"middle splice actually uses counted order without rebuild");
+    check(ipTestMiddleSplice(128*2-1,0,1),"canonical middle insertion");
+    auto middle2=render(spline);check(middle2!=middle,"second splice visible");
+    for(int i=0;i<8;++i){
+        check(Java_com_infinipaint_demo_NativeBridge_command(nullptr,nullptr,1,nullptr,0)==0,"undo second middle insertion");
+        check(render(spline)==middle,"undo restores exact first splice pixels");
+        check(Java_com_infinipaint_demo_NativeBridge_command(nullptr,nullptr,1,nullptr,0)==0,"undo first middle replacement");
+        check(render(spline)==appended,"undo restores exact original compositing");
+        check(Java_com_infinipaint_demo_NativeBridge_command(nullptr,nullptr,2,nullptr,0)==0,"redo first middle splice");
+        check(render(spline)==middle,"redo first splice exact");
+        check(Java_com_infinipaint_demo_NativeBridge_command(nullptr,nullptr,2,nullptr,0)==0,"redo second middle splice");
+        check(render(spline)==middle2,"redo second splice exact");drainSaves();
+    }
+    check(hostSpatialStats()[7]==beforeMiddle[7]&&hostPaintOrderStats()[13]==orderBefore[13],"all middle undo/redo splices avoid rebuild and write fault");
+    camera(-20,1,1.25);(void)render(spline);camera(0,0,1);check(render(spline)==middle2,"middle splice camera round trip");
+    // Corrupt sequence page (not locator) and require exact fallback.
+    faults=hostSpatialStats()[13];hostSpatialFault(4);
+    const auto sequenceDeadline=std::chrono::steady_clock::now()+5s;
+    while(hostSpatialStats()[13]==faults){(void)render(spline);check(std::chrono::steady_clock::now()<sequenceDeadline,"sequence corruption handled");std::this_thread::sleep_for(1ms);}
+    check(render(spline)==middle2&&!hostSpatialStats()[0],"counted sequence fault exact fallback");
     // Reopen-like same IDs and full root reset above, clear below.
     Java_com_infinipaint_demo_NativeBridge_suspend(nullptr,nullptr,false);
     clear();check(render(spline).front()==background,"spatial clear leaves no stale pixels");
-    std::printf("PASS spatial RGBA fixture: %u extra exact comparisons, multi-page crossings, alpha, zoom, motion, context, disk fault, epoch, overlay undo/redo\n",planComparisons-startComparisons);
+    std::printf("PASS spatial RGBA fixture: %u extra exact comparisons, multi-page crossings, alpha, zoom, motion, context, disk fault, epoch, overlay and counted middle-splice undo/redo\n",planComparisons-startComparisons);
 }
 #endif
 } // namespace

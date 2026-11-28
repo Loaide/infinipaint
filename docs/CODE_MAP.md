@@ -1,6 +1,6 @@
 ## M04 production spatial access (first slice)
 
-`tablet/spatial_pages.hpp`: checked ephemeral packed pages, bounded page/rank caches, edit BVH, sparse ordered query and charges. `tablet/spatial_delta.hpp`: validated topology-preserving/deletion/append update adapter; rebuild on arbitrary splices. `native_bridge.cpp` FramePlanner: paired roots per resident scene, compatible candidate envelope and exact fallback, telemetry. `MainActivity.dump`: spatial counters/histogram. `diagnostics/run_m04_spatial.sh stress` and `egl_ink_test.cpp`: ordered oracle, faults and seam/pixel tests. [Scope and constraints](../reports/M04_SPATIAL_ACCESS.md).
+`tablet/spatial_pages.hpp`: checked ephemeral packed pages, bounded page/rank caches, edit BVH, sparse ordered query and charges. `tablet/counted_order.hpp`: counted sequence, ID locator, split/borrow/merge/reclaim, prefix rank. `tablet/spatial_delta.hpp`: validates bounded arbitrary membership splices before mutations; rebuild on unsupported survivor reorder, overlay capacity or incompatible base. `native_bridge.cpp` FramePlanner: paired roots per resident scene, compatible candidate envelope and exact fallback, telemetry. `MainActivity.dump`: spatial counters/histogram. `diagnostics/run_m04_spatial.sh stress` and `egl_ink_test.cpp`: ordered oracle, faults and seam/pixel tests. [Scope and constraints](../reports/M04_SPATIAL_ACCESS.md).
 
 # Source map — accepted Java/JNI/C++ GLES2 diagnostic
 

@@ -1,0 +1,177 @@
+M04 counted order — observed final host outputs
+Baseline bdcc417f5b0d66716986d89833446ea4b9d82a4f. Strict GCC and Clang; Linux scratch pages and Mesa software GLES. Android build/device pending.
+
+=== counted-final ===
+seed=13792 ops=3000 checks=15549 splits=35 merges=35 borrows=357 reused=32 peak_disk=245760
+seed=13792 multi_gap_batches=600 exact_oracle=600 incremental=590 classification_reject=0 compactions=10
+PASS cascading split/merge at N=16384, exact all-page audit
+PASS cascading split/merge at N=65536, exact all-page audit
+PASS 160 forced split/merge cycles; disk plateau=114688 bytes
+PASS borrow path
+PASS N=256 9 partial-write sites in split, fail closed then exact rebuild
+PASS N=256 8 partial-write sites in merge, fail closed then exact rebuild
+PASS N=8192 38 partial-write sites in split, fail closed then exact rebuild
+PASS N=8192 38 partial-write sites in merge, fail closed then exact rebuild
+PASS exact disk-capacity failure during split
+PASS multi-gap splices, invalid deltas, empty transition, geometry-only edit, CRC32C and sequence corruption
+PASS semantic parent-count and separator faults, full-page CRC oracle
+N=1000 middle_splices=200 rebuilds=0 splice_p50_us=30.656 p95_us=39.960 max_us=144.147 writes_p50=3 writes_p95=3 writes_max=3 post_insert_query_p50_us=11.136 p95_us=14.332 max_us=84.778 disk_peak=507904
+N=10000 middle_splices=200 rebuilds=0 splice_p50_us=39.239 p95_us=49.735 max_us=109.044 writes_p50=3 writes_p95=3 writes_max=3 post_insert_query_p50_us=8.383 p95_us=12.299 max_us=735.429 disk_peak=4620288
+N=100000 middle_splices=200 rebuilds=0 splice_p50_us=118.769 p95_us=1508.194 max_us=2421.001 writes_p50=8 writes_p95=72 writes_max=137 post_insert_query_p50_us=58.608 p95_us=92.229 max_us=2678.869 disk_peak=46776320
+seed=1 ops=3000 checks=15546 splits=25 merges=25 borrows=366 reused=24 peak_disk=212992
+seed=2 ops=3000 checks=15546 splits=26 merges=26 borrows=364 reused=25 peak_disk=212992
+seed=3 ops=3000 checks=15546 splits=23 merges=23 borrows=392 reused=22 peak_disk=212992
+seed=4 ops=3000 checks=15544 splits=32 merges=32 borrows=366 reused=32 peak_disk=196608
+seed=5 ops=3000 checks=15547 splits=22 merges=22 borrows=240 reused=21 peak_disk=212992
+seed=6 ops=3000 checks=15547 splits=32 merges=32 borrows=426 reused=30 peak_disk=229376
+seed=7 ops=3000 checks=15545 splits=28 merges=28 borrows=290 reused=29 peak_disk=180224
+seed=8 ops=3000 checks=15545 splits=22 merges=22 borrows=295 reused=22 peak_disk=196608
+seed=9 ops=3000 checks=15546 splits=23 merges=23 borrows=331 reused=23 peak_disk=196608
+seed=10 ops=3000 checks=15545 splits=19 merges=19 borrows=352 reused=18 peak_disk=212992
+seed=11 ops=3000 checks=15545 splits=12 merges=12 borrows=269 reused=13 peak_disk=180224
+seed=12 ops=3000 checks=15546 splits=20 merges=20 borrows=323 reused=20 peak_disk=196608
+seed=13 ops=3000 checks=15546 splits=36 merges=36 borrows=299 reused=35 peak_disk=212992
+seed=14 ops=3000 checks=15547 splits=27 merges=27 borrows=440 reused=25 peak_disk=229376
+seed=15 ops=3000 checks=15545 splits=16 merges=16 borrows=360 reused=17 peak_disk=180224
+seed=16 ops=3000 checks=15545 splits=35 merges=35 borrows=400 reused=35 peak_disk=196608
+seed=17 ops=3000 checks=15547 splits=29 merges=29 borrows=322 reused=28 peak_disk=212992
+seed=18 ops=3000 checks=15547 splits=14 merges=14 borrows=382 reused=13 peak_disk=212992
+seed=19 ops=3000 checks=15545 splits=37 merges=37 borrows=328 reused=38 peak_disk=180224
+seed=20 ops=3000 checks=15545 splits=26 merges=26 borrows=411 reused=26 peak_disk=196608
+seed=21 ops=3000 checks=15546 splits=30 merges=30 borrows=329 reused=28 peak_disk=229376
+seed=22 ops=3000 checks=15546 splits=40 merges=40 borrows=545 reused=39 peak_disk=212992
+seed=23 ops=3000 checks=15546 splits=16 merges=16 borrows=370 reused=16 peak_disk=196608
+seed=24 ops=3000 checks=15545 splits=21 merges=21 borrows=307 reused=21 peak_disk=196608
+seed=4294967295 ops=3000 checks=15547 splits=26 merges=26 borrows=499 reused=25 peak_disk=212992
+seed=1 multi_gap_batches=600 exact_oracle=600 incremental=591 classification_reject=0 compactions=9
+seed=2 multi_gap_batches=600 exact_oracle=600 incremental=590 classification_reject=0 compactions=10
+seed=3 multi_gap_batches=600 exact_oracle=600 incremental=590 classification_reject=0 compactions=10
+seed=4 multi_gap_batches=600 exact_oracle=600 incremental=591 classification_reject=0 compactions=9
+seed=5 multi_gap_batches=600 exact_oracle=600 incremental=590 classification_reject=0 compactions=10
+seed=6 multi_gap_batches=600 exact_oracle=600 incremental=590 classification_reject=0 compactions=10
+seed=7 multi_gap_batches=600 exact_oracle=600 incremental=590 classification_reject=0 compactions=10
+seed=8 multi_gap_batches=600 exact_oracle=600 incremental=590 classification_reject=0 compactions=10
+seed=9 multi_gap_batches=600 exact_oracle=600 incremental=590 classification_reject=0 compactions=10
+seed=10 multi_gap_batches=600 exact_oracle=600 incremental=591 classification_reject=0 compactions=9
+seed=11 multi_gap_batches=600 exact_oracle=600 incremental=590 classification_reject=0 compactions=10
+seed=12 multi_gap_batches=600 exact_oracle=600 incremental=591 classification_reject=0 compactions=9
+seed=13 multi_gap_batches=600 exact_oracle=600 incremental=591 classification_reject=0 compactions=9
+seed=14 multi_gap_batches=600 exact_oracle=600 incremental=590 classification_reject=0 compactions=10
+seed=15 multi_gap_batches=600 exact_oracle=600 incremental=590 classification_reject=0 compactions=10
+
+=== paired-final ===
+PASS 10 allocation failure points and real partial-write fault
+PASS fault injection, cancellation, capacity, overlay compaction, incomplete delta
+PASS dense 65,537 overlaps: strict overflow and complete ordered control
+seed=1 edits=1500 ordered_oracle=4542 fast=1491 rebuilds=10 compactions=9 peak_disk=704512 peak_dynamic=85920
+seed=2 edits=1500 ordered_oracle=4542 fast=1491 rebuilds=10 compactions=9 peak_disk=671744 peak_dynamic=80448
+seed=3 edits=1500 ordered_oracle=4542 fast=1491 rebuilds=10 compactions=9 peak_disk=737280 peak_dynamic=86976
+seed=4 edits=1500 ordered_oracle=4542 fast=1491 rebuilds=10 compactions=9 peak_disk=688128 peak_dynamic=83104
+seed=5 edits=1500 ordered_oracle=4542 fast=1491 rebuilds=10 compactions=9 peak_disk=720896 peak_dynamic=87680
+seed=6 edits=1500 ordered_oracle=4542 fast=1491 rebuilds=10 compactions=9 peak_disk=720896 peak_dynamic=86688
+seed=7 edits=1500 ordered_oracle=4542 fast=1491 rebuilds=10 compactions=9 peak_disk=720896 peak_dynamic=83104
+seed=8 edits=1500 ordered_oracle=4542 fast=1491 rebuilds=10 compactions=9 peak_disk=737280 peak_dynamic=87488
+seed=9 edits=1500 ordered_oracle=4542 fast=1491 rebuilds=10 compactions=9 peak_disk=720896 peak_dynamic=89088
+seed=10 edits=1500 ordered_oracle=4542 fast=1491 rebuilds=10 compactions=9 peak_disk=655360 peak_dynamic=81408
+seed=11 edits=1500 ordered_oracle=4542 fast=1491 rebuilds=10 compactions=9 peak_disk=671744 peak_dynamic=80064
+seed=12 edits=1500 ordered_oracle=4542 fast=1491 rebuilds=10 compactions=9 peak_disk=655360 peak_dynamic=78240
+seed=13 edits=1500 ordered_oracle=4542 fast=1491 rebuilds=10 compactions=9 peak_disk=720896 peak_dynamic=86176
+seed=14 edits=1500 ordered_oracle=4542 fast=1491 rebuilds=10 compactions=9 peak_disk=720896 peak_dynamic=87360
+seed=15 edits=1500 ordered_oracle=4542 fast=1491 rebuilds=10 compactions=9 peak_disk=753664 peak_dynamic=94624
+seed=16 edits=1500 ordered_oracle=4542 fast=1491 rebuilds=10 compactions=9 peak_disk=753664 peak_dynamic=91808
+seed=17 edits=1500 ordered_oracle=4542 fast=1491 rebuilds=10 compactions=9 peak_disk=688128 peak_dynamic=83424
+seed=18 edits=1500 ordered_oracle=4542 fast=1491 rebuilds=10 compactions=9 peak_disk=720896 peak_dynamic=88320
+seed=19 edits=1500 ordered_oracle=4542 fast=1491 rebuilds=10 compactions=9 peak_disk=655360 peak_dynamic=77920
+seed=20 edits=1500 ordered_oracle=4542 fast=1491 rebuilds=10 compactions=9 peak_disk=753664 peak_dynamic=92448
+seed=21 edits=1500 ordered_oracle=4542 fast=1491 rebuilds=10 compactions=9 peak_disk=688128 peak_dynamic=84576
+seed=22 edits=1500 ordered_oracle=4542 fast=1491 rebuilds=10 compactions=9 peak_disk=704512 peak_dynamic=87232
+seed=23 edits=1500 ordered_oracle=4542 fast=1491 rebuilds=10 compactions=9 peak_disk=655360 peak_dynamic=78240
+seed=24 edits=1500 ordered_oracle=4542 fast=1491 rebuilds=10 compactions=9 peak_disk=753664 peak_dynamic=89024
+seed=13792 edits=1500 ordered_oracle=4542 fast=1491 rebuilds=10 compactions=9 peak_disk=720896 peak_dynamic=85728
+seed=4294967295 edits=1500 ordered_oracle=4542 fast=1491 rebuilds=10 compactions=9 peak_disk=671744 peak_dynamic=81152
+
+=== query-scale-final ===
+N=1000 k=256 build_ms=1.087 first_query_us=358.470 p50_us=5.348 p95_us=9.004 max_us=522.978 spatial_pages/query=5.00 bounds/query=272.00 reads/query=0.020 rank_lookups/query=256.00 disk=507904 dynamic_peak=64512
+N=10000 k=256 build_ms=11.646 first_query_us=1008.080 p50_us=5.788 p95_us=5.899 max_us=1008.080 spatial_pages/query=6.00 bounds/query=323.00 reads/query=0.350 rank_lookups/query=256.00 disk=4620288 dynamic_peak=645024
+N=100000 k=256 build_ms=216.006 first_query_us=2724.067 p50_us=5.909 p95_us=6.540 max_us=2724.067 spatial_pages/query=6.00 bounds/query=345.00 reads/query=0.993 rank_lookups/query=256.00 disk=45432832 dynamic_peak=6450016
+
+=== sanitizers-final ===
+seed=13792 ops=3000 checks=15549 splits=35 merges=35 borrows=357 reused=32 peak_disk=245760
+seed=4294967295 ops=3000 checks=15547 splits=26 merges=26 borrows=499 reused=25 peak_disk=212992
+seed=17 multi_gap_batches=600 exact_oracle=600 incremental=590 classification_reject=0 compactions=10
+PASS N=256 9 partial-write sites in split, fail closed then exact rebuild
+PASS N=256 8 partial-write sites in merge, fail closed then exact rebuild
+PASS N=8192 38 partial-write sites in split, fail closed then exact rebuild
+PASS N=8192 38 partial-write sites in merge, fail closed then exact rebuild
+PASS exact disk-capacity failure during split
+PASS multi-gap splices, invalid deltas, empty transition, geometry-only edit, CRC32C and sequence corruption
+PASS semantic parent-count and separator faults, full-page CRC oracle
+PASS cascading split/merge at N=16384, exact all-page audit
+PASS cascading split/merge at N=65536, exact all-page audit
+PASS 160 forced split/merge cycles; disk plateau=114688 bytes
+PASS borrow path
+seed=27182 edits=1500 ordered_oracle=4542 fast=1491 rebuilds=10 compactions=9 peak_disk=770048 peak_dynamic=95040
+PASS 10 allocation failure points and real partial-write fault
+PASS fault injection, cancellation, capacity, overlay compaction, incomplete delta
+PASS dense 65,537 overlaps: strict overflow and complete ordered control
+
+=== smoke-final ===
+PASS bridge: incremental VBO, real One-Euro/spline/preset geometry differences, lazy uploads, culling, zoom, same-time, context restore, clear, zero unrelated undo upload; incremental_bytes=2376
+PASS parked GL switch rejected at slice=64161023; identical retry fits after 64 patch nodes retire; cancel retained/released 95544 live VBO bytes
+PASS M04.3-B: parked mutation, contended publication, retry, live/commit handoff, context rebuild
+PASS M04.3-C planner: exact fallback, stale camera, ordered delta/epoch backpressure, bounded live retirement, context recovery; hits=20 fallback=11 backpressure=8 retired=9
+PASS live prefix: 8193 values, concurrent frozen count, group rollover, allocation rollback, final-owner credit
+PASS scheduler: 200000 ordered moves, full ownership, 200000 latest publications, coalesced wake delivery
+PASS InkLane: parked consumer, FIFO, terminal reserve, bounded saturation, 100 reuse cycles, idle interrupt
+PASS deterministic mixed gesture stress: 5329 strokes
+PASS production InkPipeline: FIFO, both blocked phases, repeated retry/discard, reserved terminal, sample failure, cancel races, bounded callbacks
+
+=== document-final ===
+PASS M03 v1 codec, reversible splices, history, ID ranges, seeded 10000-step ordered oracle, queue reserve/saturation/retry
+PASS grouped edit: 7 injected allocation failures leave membership, IDs, revision, queue and budgets retryable
+
+=== pixels1-final ===
+GL_VERSION=OpenGL ES 2.0 Mesa 25.0.7-2 GL_RENDERER=llvmpipe (LLVM 19.1.7, 256 bits)
+verified context coverage path: max_blend=1
+mode=0 live width_px=1.83/2.96/4.06/5.22
+mode=0 completed width_px=1.83/2.96/4.06/5.22
+mode=0 pen_up changed_pixels=0 sum_max_rgb_delta=0
+mode=2 live width_px=1.84/2.97/4.07/5.25
+mode=2 completed width_px=1.84/2.97/4.07/5.25
+mode=2 pen_up changed_pixels=0 sum_max_rgb_delta=0
+composite order probe red: thick_only=51 thick_last=51 thin_last=85
+equivalent path max RGB delta=0/255
+equivalent path max RGB delta=0/255
+equivalent path max RGB delta=0/255
+equivalent path max RGB delta=0/255
+PASS: 300-sample live paged prefix and sealed four-mode context parity
+PASS: v1 codec and reconstruction vertex bytes + 4-mode RGBA parity
+PASS spatial RGBA fixture: 171 extra exact comparisons, multi-page crossings, alpha, zoom, motion, context, disk fault, epoch, overlay and counted middle-splice undo/redo
+PASS: production GLES2 shader, pressure dots/taper, pen-up, and completed order
+PASS: 256 matched-plan versus exact-fallback RGBA frames
+
+=== pixels0-final ===
+Warning: extension 'GL_EXT_blend_minmax' cannot be disabled
+GL_VERSION=OpenGL ES 2.0 Mesa 25.0.7-2 GL_RENDERER=llvmpipe (LLVM 19.1.7, 256 bits)
+verified context coverage path: max_blend=0
+mode=0 live width_px=1.88/3.00/4.00/5.25
+mode=0 completed width_px=1.88/3.00/4.00/5.25
+mode=0 pen_up changed_pixels=0 sum_max_rgb_delta=0
+mode=2 live width_px=1.88/3.00/4.12/5.25
+mode=2 completed width_px=1.88/3.00/4.12/5.25
+mode=2 pen_up changed_pixels=0 sum_max_rgb_delta=0
+composite order probe red: thick_only=51 thick_last=51 thin_last=85
+equivalent path max RGB delta=0/255
+equivalent path max RGB delta=0/255
+equivalent path max RGB delta=0/255
+equivalent path max RGB delta=0/255
+diagonal taper fallback vs MAX max RGB delta=8/255
+PASS: 300-sample live paged prefix and sealed four-mode context parity
+PASS: v1 codec and reconstruction vertex bytes + 4-mode RGBA parity
+PASS spatial RGBA fixture: 171 extra exact comparisons, multi-page crossings, alpha, zoom, motion, context, disk fault, epoch, overlay and counted middle-splice undo/redo
+PASS: production GLES2 shader, pressure dots/taper, pen-up, and completed order
+PASS: 256 matched-plan versus exact-fallback RGBA frames
+
+=== repeated planner ===
+100/100 PASS, representative output:
+PASS M04.3-C planner: exact fallback, stale camera, ordered delta/epoch backpressure, bounded live retirement, context recovery; hits=20 fallback=11 backpressure=8 retired=9

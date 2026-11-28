@@ -29,6 +29,7 @@ public final class NativeBridge {
  static native void configureSpatialCache(String path);
  static native long[] spatialCounters();
  static native long[] spatialLatency();
+ static native long[] paintOrderCounters();
 
 
 }
