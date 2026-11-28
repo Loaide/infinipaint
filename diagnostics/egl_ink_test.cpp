@@ -434,6 +434,22 @@ int main() {
     testDwell(background);
     measureJoinAA();
     comparePortableRamp();
+    // Exercise page boundaries, live suffix uploads, mode changes and a
+    // context rebuild without sealing the stroke. All four live frames must
+    // be identical to fresh GPU uploads of the same immutable prefix.
+    clear();begin(19);
+    for(int i=0;i<300;++i) {
+        sample(19,8+(i*7)%110,8+(i*13)%48,1+i*.005f,.2f+.1f*(i%8));
+        if(i%37==0) (void)render(i%4);
+    }
+    const std::array<Frame,4> livePaged{render(0),render(1),render(2),render(3)};
+    pbuffer.recreate();
+    for(int i=0;i<4;++i) check(render(i)==livePaged[i],"live paged prefix differs after context rebuild");
+    end(19);
+    const std::array<Frame,4> sealedPaged{render(0),render(1),render(2),render(3)};
+    pbuffer.recreate();
+    for(int i=0;i<4;++i) check(render(i)==sealedPaged[i],"sealed paged prefix differs after context rebuild");
+    std::puts("PASS: 300-sample live paged prefix and sealed four-mode context parity");
 #ifdef IP_REPLAY_TEST
     clear();
     begin(12);

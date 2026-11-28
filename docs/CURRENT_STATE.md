@@ -2,7 +2,7 @@
 
 - M00, M00.5, M01 and M02: accepted.
 - M03: formally accepted with documented limitations.
-- M04: [direction approved in principle with conditions](M04_PROPOSAL.md); HOST_02 findings accepted; [M04.2 bounded host data feasibility](../reports/M04_2_DATA_ACCESS.md) complete. Production M04.3 work in progress; see the scoped checkpoint report.
+- M04: [direction approved in principle with conditions](M04_PROPOSAL.md); HOST_02 findings accepted; [M04.2 bounded host data feasibility](../reports/M04_2_DATA_ACCESS.md) complete. Production M04.3 work in progress; [renderer isolation candidate](../reports/M04_3_RENDER_PUBLICATION.md) host and tablet functionally verified.
 - M05, M06 and M07: upcoming.
 
 See [M03 formal acceptance](../reports/M03_ACCEPTED.md).

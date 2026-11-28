@@ -1,3 +1,9 @@
+# M04.3-B render publication isolation — functionally verified
+
+See [current report](M04_3_RENDER_PUBLICATION.md) for scope, source anchor, host results and completed tablet verification and remaining performance obligations. No Vulkan cutover or full M04.3 acceptance.
+
+---
+
 # M04.3 authorized — backend selected
 
 Owner selected native Vulkan with compact instancing on SM-X626B. [Gate evidence, scope and unresolved fidelity](M04_BACKEND_GATE.md). Earlier status below is historical.

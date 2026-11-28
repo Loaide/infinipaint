@@ -26,6 +26,7 @@
 #include "document/working_set.hpp"
 #include "tablet/session.hpp"
 #include "tablet/view_intent.hpp"
+#include "tablet/live_prefix.hpp"
 #include <cstring>
 #include "stroke/spline.hpp"
 
@@ -66,14 +67,15 @@ namespace {
         }
     };
     std::atomic<uint64_t> retainedMeshes{0},activeHigh{0},switchHigh{0},gpuRequested{0},gpuHigh{0};
-    std::atomic<uint64_t> historyCharge{0},queueHigh{0},canonicalCharge{0},snapshotHigh{0};
+    std::atomic<uint64_t> historyCharge{0},queueHigh{0},canonicalCharge{0};
     std::atomic<uint64_t> physicalSlice{0},sceneOwners{0},candidateNodes{0},liveVboCharge{0};
+    std::atomic<uint64_t> livePublicationBytes{0},livePublicationHigh{0},publicationRetries{0};
     bool admits(uint64_t activeMesh,uint64_t samples,uint64_t decoding=0,uint64_t extraNodes=0) {
         const auto slice=physicalSlice.load(std::memory_order_relaxed);
         if(!slice) return true; // host renderer fixtures have no Android process
         return document::WorkingSet::forSlice(slice).admits(document::Ink::liveBytes.load(),
                 retainedMeshes.load(),sceneOwners.load()+candidateNodes.load()+4+extraNodes,
-                activeMesh,samples,decoding,liveVboCharge.load());
+                activeMesh,samples,decoding+livePublicationBytes.load(),liveVboCharge.load());
     }
     // Count allocations, not map sizes sampled at publication boundaries. swap
     // and node-handle merge transfer ownership without changing this ledger.
@@ -107,6 +109,61 @@ namespace {
     // The base is destroyed AFTER the member vectors finish deallocation.
     struct CompletedGeometry : GeometryCharge {std::array<Mesh,3> derived;};
 
+    // Charges every retained mirror page/directory/tail until its final owner
+    // releases storage, including conservative 2x payload GPU-growth credit.
+    // Actual VBO reservations are also counted, intentionally double-reserving
+    // that headroom. This protects a parked old latch after cancel/seal and
+    // before a late upload; full cross-lane byte credits remain future work.
+    struct LivePublicationCharge {
+        size_t bytes;
+        explicit LivePublicationCharge(size_t n):bytes(n) {
+            if(!admits(0,0,n)) throw std::bad_alloc{};
+            peak(livePublicationHigh,livePublicationBytes.fetch_add(n)+n);
+        }
+        ~LivePublicationCharge(){livePublicationBytes.fetch_sub(bytes);}
+        LivePublicationCharge(const LivePublicationCharge&)=delete;
+    };
+    using LivePrefix=tablet::LivePrefix<Vertex,LivePublicationCharge>;
+    struct LiveTail : LivePublicationCharge {
+        std::array<Vertex,(stroke::IncrementalSplineBuilder::max_steps+1)*6> values;
+        size_t count=0;
+        LiveTail():LivePublicationCharge(sizeof(LiveTail)+64+2*sizeof(values)) {}
+    };
+    struct LiveMirror {
+        std::array<LivePrefix,3> prefix;
+        std::shared_ptr<const LiveTail> tail;
+        std::shared_ptr<LiveTail> candidate;
+        std::array<std::shared_ptr<LiveTail>,3> tailPool;
+        void prepareTail() {
+            // A slot with only the pool reference is no longer reachable from
+            // any publication. Reuse it without touching any reader's bytes.
+            for(auto& slot:tailPool) {
+                if(!slot) slot=std::make_shared<LiveTail>();
+                if(slot.use_count()==1) {candidate=slot;return;}
+            }
+            // A renderer may be releasing an older handle outside the port.
+            // One bounded transient candidate is allowed and charged.
+            candidate=std::make_shared<LiveTail>();
+        }
+    };
+    struct LiveMeshView {
+        LivePrefix::View prefix;
+        std::shared_ptr<const LiveTail> tail;
+        size_t size() const {return tail?tail->count:prefix.size();}
+        template<class F> void visit(size_t offset,F&& f) const {
+            if(tail) {if(offset<tail->count) f(offset,std::span<const Vertex>(tail->values.data()+offset,tail->count-offset));}
+            else prefix.visit(offset,std::forward<F>(f));
+        }
+    };
+    struct LiveView {
+        uint64_t id=0,tailRevision=0;
+        Bounds bounds;
+        std::array<LiveMeshView,4> parts;
+        float lastX=0,lastY=0,filteredX=0,filteredY=0;
+        bool hasLast=false,hasFiltered=false;
+        float radiusWorld=1.9f,filteredRadius=1.9f;
+    };
+
     struct Trace {
         tablet::ViewIntent captureView;
         uint64_t gpuId = 0;
@@ -124,6 +181,7 @@ namespace {
         std::shared_ptr<const document::Ink> sealed;
         std::shared_ptr<CompletedGeometry> completion=std::make_shared<CompletedGeometry>();
         uint64_t tailRevision = 0;
+        std::unique_ptr<LiveMirror> mirror; // live JNI only; replay scratch stays v1
 
         std::vector<float> rawPoints;
         std::vector<float> cleanPoints;
@@ -211,6 +269,28 @@ namespace {
     }
     using Scene=std::map<Key,Published,std::less<Key>,SceneAllocator<std::pair<const Key,Published>>>;
     Scene finished, pendingScene;
+    // Writers serialize on stateMutex. Only publication metadata and pending
+    // patch ownership cross this separate port. GL never takes stateMutex.
+    // Lock order: state -> publication -> view; GL try-locks publication.
+    std::mutex publicationMutex;
+    LiveView publishedLive;
+    struct RenderLatch {
+        LiveView active;
+        tablet::ViewIntent view;
+        Key head=0;
+        uint64_t epoch=0;
+        document::Revision revision=0;
+    };
+    RenderLatch renderLatch; // GL-owned; keep prior coherent latch on contention
+    bool publicationRetry=false; // GL-owned, consumed by onDrawFrame
+    size_t pendingCount() {
+        std::lock_guard guard(publicationMutex);
+        return pendingScene.size();
+    }
+    void retireLivePublication() {
+        LiveView retired;
+        {std::lock_guard guard(publicationMutex); std::swap(retired,publishedLive);}
+    }
     document::Revision sceneRevision=0; // belongs to the published head + patch, not the save worker
     size_t sceneBytes=0,sceneLimit=SIZE_MAX,canonicalLimit=SIZE_MAX;
     constexpr size_t publicationLimit=65536;
@@ -561,12 +641,52 @@ void main() {
                 reserveExtra(t.stableMesh,2*maxPart+12);
                 if(t.tailMesh.capacity()<maxPart) t.tailMesh.reserve(maxPart);
             } else reserveExtra(t.stableMesh,12);
+            if(t.mirror) {
+                auto& m=*t.mirror;
+                m.prefix[0].reserve(18); m.prefix[1].reserve(24); m.prefix[2].reserve(stableExtra);
+                m.candidate.reset();
+                if(moving && !t.input.clean_samples().empty()) m.prepareTail();
+                const auto bytes=(t.rawMesh.capacity()+t.cleanMesh.capacity()+t.stableMesh.capacity())*sizeof(Vertex);
+                if(!admits(bytes,t.input.raw_samples().size()+1))
+                    return core::Error{core::ErrorCode::ResourceLimit,"Live publication budget"};
+            }
         } catch(const std::bad_alloc&) {
             return core::Error{core::ErrorCode::AllocationFailure,"Trace allocation failed"};
         } catch(const std::length_error&) {
             return core::Error{core::ErrorCode::ResourceLimit,"Trace capacity limit"};
         }
         return t.spline.append({c.position,c.timestamp,c.pressure,c.tilt_x,c.tilt_y,c.speed});
+    }
+
+    // All allocations were reserved by prepareSample, before accepted input.
+    // Build the next small handle packet outside the publication lock.
+    void publishLive(Trace& t) noexcept {
+        auto& m=*t.mirror;
+        m.prefix[0].extend(t.rawMesh);m.prefix[1].extend(t.cleanMesh);m.prefix[2].extend(t.stableMesh);
+        if(m.candidate) {
+            assert(t.tailMesh.size()<=m.candidate->values.size());
+            std::copy(t.tailMesh.begin(),t.tailMesh.end(),m.candidate->values.begin());
+            m.candidate->count=t.tailMesh.size();m.tail=std::move(m.candidate);
+        }
+        LiveView next;
+        next.id=t.gpuId;next.tailRevision=t.tailRevision;next.bounds=t.bounds;
+        for(size_t i=0;i<3;++i) next.parts[i].prefix=m.prefix[i].view();
+        next.parts[3].tail=m.tail;
+        next.radiusWorld=t.rawPeak;next.filteredRadius=t.cleanPeak;
+        if(t.cleanPoints.size()>=2) {
+            next.filteredX=t.cleanPoints[t.cleanPoints.size()-2];next.filteredY=t.cleanPoints.back();next.hasFiltered=true;
+        }
+        if(t.rawPoints.size()>=2) {
+            next.lastX=t.rawPoints[t.rawPoints.size()-2];next.lastY=t.rawPoints.back();next.hasLast=true;
+            float pad=std::max(t.rawPeak,t.cleanPeak)+1.f/(float)MIN_ZOOM;
+            auto& q=next.bounds;
+            q.minX=std::min(q.minX,std::min(next.lastX,next.filteredX)-pad);
+            q.maxX=std::max(q.maxX,std::max(next.lastX,next.filteredX)+pad);
+            q.minY=std::min(q.minY,std::min(next.lastY,next.filteredY)-pad);
+            q.maxY=std::max(q.maxY,std::max(next.lastY,next.filteredY)+pad);
+        }
+        // Swap, then release obsolete handles outside the port.
+        {std::lock_guard guard(publicationMutex);std::swap(next,publishedLive);}
     }
 
 // --------------------------------------------------
@@ -686,7 +806,7 @@ void main() {
         size_t offset = 0;
         size_t plannedCapacity = 0;
         uint64_t revision = 0;
-        std::vector<Vertex> data;
+        LiveMeshView data;
     };
 
     struct FrameGrowth {
@@ -694,7 +814,7 @@ void main() {
         void reserve(size_t n) {pending+=n;liveVboCharge.fetch_add(n);}
         ~FrameGrowth(){liveVboCharge.fetch_sub(pending);}
     };
-    LiveUpload snapshotUpload(FrameGrowth& growth,const Mesh& mesh, uint64_t id, int part, uint64_t revision = 0) {
+    LiveUpload snapshotUpload(FrameGrowth& growth,const LiveMeshView& mesh, uint64_t id, int part, uint64_t revision = 0) {
         LiveUpload result;
         result.total = mesh.size();
         result.revision = revision;
@@ -707,16 +827,17 @@ void main() {
             const size_t finishRoom=part==2 ? (maxSteps+1)*6+12 : part==3 ? 0 : 12;
             result.plannedCapacity=std::max(n+std::min(finishRoom,std::max(size_t(12),n/8)),
                                             std::max(size_t(256),capacity*2));
-            // Reserve under stateMutex while the active admission still owns
-            // this prefix. Cancellation may run immediately after snapshot.
+            // Reserve while the latched immutable prefix is still pinned.
+            // No mutable trace or input-state lock is needed.
             growth.reserve((result.plannedCapacity-capacity)*sizeof(Vertex));
         }
-        if (part == 3 && previous && previous->revision == revision && uploaded == result.total)
+        if (part == 3 && previous && previous->revision == revision && uploaded == result.total) {
+            result.offset=result.total;
             return result;
+        }
         result.offset = (part == 3 || result.total < uploaded || result.total > capacity)
                 ? 0 : uploaded;
-        if (result.total > result.offset)
-            result.data.assign(mesh.begin() + result.offset, mesh.end());
+        if (result.total > result.offset) result.data=mesh;
         return result;
     }
 
@@ -738,11 +859,12 @@ void main() {
             cached.capacityVertices = cap;
             ++liveBufferReallocations;
         }
-        if (!mesh.data.empty()) {
-            glBufferSubData(GL_ARRAY_BUFFER, (GLintptr)(mesh.offset * sizeof(Vertex)),
-                            (GLsizeiptr)(mesh.data.size() * sizeof(Vertex)), mesh.data.data());
-            frameUploadBytes += mesh.data.size() * sizeof(Vertex);
-            liveUploadBytes += mesh.data.size() * sizeof(Vertex);
+        if (mesh.total>mesh.offset) {
+            mesh.data.visit(mesh.offset,[&](size_t offset,std::span<const Vertex> vertices) {
+                glBufferSubData(GL_ARRAY_BUFFER,(GLintptr)(offset*sizeof(Vertex)),
+                                (GLsizeiptr)vertices.size_bytes(),vertices.data());
+                frameUploadBytes+=vertices.size_bytes();liveUploadBytes+=vertices.size_bytes();
+            });
             if (mesh.offset > 0) ++liveIncrementalUpdates;
             if(glGetError()!=GL_NO_ERROR) {
                 // Includes failed storage allocation. Do not publish a prefix
@@ -889,6 +1011,7 @@ struct SceneSink final : document::Observer {
                 auto s=saves.prepare(doc,touched);
                 if(s!=document::Status::Ok) return s;
             }
+            std::lock_guard publish(publicationMutex);
             finished.swap(retired);pendingScene.swap(unused);
             ++finishedEpoch;sceneHead=0;sceneBytes=0;sceneRevision=doc.revision()+1;
             return document::Status::Ok;
@@ -911,6 +1034,9 @@ struct SceneSink final : document::Observer {
             sceneHead=doc.first();sceneBytes+=appendedBytes;sceneRevision=doc.revision()+1;
             return document::Status::Ok;
         }
+        // A live ticket must use its pre-reserved append nodes. Do not enter
+        // the edit path (which takes publicationMutex itself) on a broken ticket.
+        if(appended) return document::Status::Conflict;
         size_t projected=sceneBytes;
         for(auto e:touched) {
             if(e.geometry && stage.try_emplace(e.id).second) {
@@ -927,13 +1053,10 @@ struct SceneSink final : document::Observer {
             dst.next=r->next;
             if(changed && dst.geometry!=doc.revision()+1) {
                 dst.geometry=doc.revision()+1;
-                if(appended) {dst.shape=appended;dst.bytes=appendedBytes;}
-                else {
-                    auto shape=std::make_shared<FinishedTrace>();
-                    if(!reconstructV1(r->value.ink,*shape,r->value.dx,r->value.dy,sceneLimit-projected,canonicalLimit)) {valid=false;return;}
-                    dst.shape=std::move(shape);
-                    dst.bytes=meshBytes(*dst.shape);
-                }
+                auto shape=std::make_shared<FinishedTrace>();
+                if(!reconstructV1(r->value.ink,*shape,r->value.dx,r->value.dy,sceneLimit-projected,canonicalLimit)) {valid=false;return;}
+                dst.shape=std::move(shape);
+                dst.bytes=meshBytes(*dst.shape);
                 if(dst.bytes>sceneLimit-projected) {valid=false;return;}
                 projected+=dst.bytes;
             } else if(!dst.shape) {dst=finished.at(id);dst.next=r->next;}
@@ -947,11 +1070,14 @@ struct SceneSink final : document::Observer {
         std::unique_lock lock(stateMutex,std::defer_lock);
         if(worker) lock.lock();
         if(persistent) {
-            if(!appended && pendingScene.size()+stage.size()>publicationLimit)
+            if(pendingCount()+stage.size()>publicationLimit)
                 return document::Status::QueueLimit;
             auto s=saves.prepare(doc,touched);
             if(s!=document::Status::Ok) return s;
         }
+        // Expensive rebuild and save planning are finished. The port only
+        // publishes the prepared patch; GL never waits if a large merge runs.
+        std::lock_guard publish(publicationMutex);
         for(auto& [id,p]:stage) finished.erase(id);
         for(auto it=stage.begin();it!=stage.end();) {
             if(!it->second.shape) it=stage.erase(it); else ++it;
@@ -1033,10 +1159,11 @@ static jboolean beginCaptured(jint id,jint tool,tablet::ViewIntent view,int pres
 
     try {
         if(!readyModel() || suspended || !model->canAllocate() || live.count(id) ||
-           (persistent && (pendingScene.size()+2>publicationLimit ||
+           (persistent && (pendingCount()+2>publicationLimit ||
                            model->canonicalBytes()+1024>canonicalLimit || sceneLimit-sceneBytes<54*sizeof(Vertex) ||
                            !admits(54*sizeof(Vertex),1)))) return JNI_FALSE;
         auto trace=std::make_unique<Trace>(std::move(inputProcessor.value()),std::move(fitter.value()));
+        trace->mirror=std::make_unique<LiveMirror>();
         trace->captureView = view;
         trace->strokeRadiusWorld = (float)(1.9 / trace->captureView.zoom);
         trace->meshAllowance=sceneLimit-sceneBytes;
@@ -1142,6 +1269,7 @@ Java_com_infinipaint_demo_NativeBridge_sample(
             ty
     };
     if (!appendV1(trace,point,trace.captureView.zoom,waitNs,true)) return JNI_FALSE;
+    publishLive(trace);
     const int64_t nowNs = profileNs();
     newestEventNs.store(static_cast<int64_t>(time*1000000000.0),std::memory_order_relaxed);
     latestSampleEndNs.store(nowNs,std::memory_order_relaxed);
@@ -1244,14 +1372,17 @@ Java_com_infinipaint_demo_NativeBridge_end(
 
     auto& trace = *it->second;
     if(!trace.sealed && trace.input.raw_samples().empty()) return JNI_FALSE;
-    // Allocate the ordered slot before touching live meshes. No render can
-    // observe it until populated. Sample preflight reserved terminal geometry.
+    // Append notification and live removal are one atomic publication. No
+    // renderer may observe a partly filled FinishedTrace or double-draw it.
+    LiveView retiredPublication;
+    std::unique_lock<std::mutex> publish(publicationMutex,std::defer_lock);
     try {
         auto shape=std::make_shared<FinishedTrace>();
         if(!trace.sealed) trace.sealed=std::make_shared<tablet::AdoptAccepted>(trace.input,trace.brush);
         sceneSink.appended=shape;
         sceneSink.appendedBytes=(trace.rawMesh.capacity()+trace.cleanMesh.capacity()+trace.stableMesh.capacity())*sizeof(Vertex);
         peak(activeHigh,workingBytes(trace));
+        publish.lock();
         saves.committingStroke(true);
         auto result=model->commitStroke({trace.sealed});
         saves.committingStroke(false);
@@ -1270,6 +1401,8 @@ Java_com_infinipaint_demo_NativeBridge_end(
     const size_t rawSamples=trace.rawPoints.size()/2, cleanSamples=trace.cleanPoints.size()/2;
     auto retired=std::move(it->second);
     live.erase(it);
+    std::swap(retiredPublication,publishedLive);
+    publish.unlock();
     const auto held=profileNs()-lockStart;
     guard.unlock();
     __android_log_print(ANDROID_LOG_INFO, "IP_GEOMETRY",
@@ -1350,7 +1483,7 @@ JNIEXPORT jlong JNICALL Java_com_infinipaint_demo_NativeBridge_revision(JNIEnv*,
     return visibleRevision.load();
 }
 JNIEXPORT jlongArray JNICALL Java_com_infinipaint_demo_NativeBridge_memory(JNIEnv* env,jclass) {
-    std::array<jlong,13> a{};
+    std::array<jlong,16> a{};
     {
         std::lock_guard guard(stateMutex);
         uint64_t active=0;
@@ -1358,7 +1491,8 @@ JNIEXPORT jlongArray JNICALL Java_com_infinipaint_demo_NativeBridge_memory(JNIEn
         a={jlong(document::Ink::liveBytes.load()),jlong(canonicalCharge.load()),jlong(retainedMeshes.load()),
            jlong(active),jlong(activeHigh.load()),jlong(gpuRequested.load()),jlong(gpuHigh.load()),
            jlong(historyCharge.load()),jlong(saves.bytes()),jlong(queueHigh.load()),jlong(switchHigh.load()),
-           jlong(snapshotHigh.load()),jlong(pendingScene.size())};
+           jlong(0),jlong(pendingCount()),jlong(livePublicationBytes.load()),
+           jlong(livePublicationHigh.load()),jlong(publicationRetries.load())};
     }
     auto array=env->NewLongArray(a.size());if(array)env->SetLongArrayRegion(array,0,a.size(),a.data());return array;
 }
@@ -1472,8 +1606,8 @@ bool ipTestCodecReplay() {
         if(!equal(old.raw,replay.raw)||!equal(old.clean,replay.clean)||!equal(old.spline,replay.spline)) return false;
         pub.shape=std::make_shared<const FinishedTrace>(std::move(replay));
     }
-    pendingScene=finished;
-    ++finishedEpoch;
+    {std::lock_guard publish(publicationMutex);pendingScene=finished;
+    ++finishedEpoch;}
     return !finished.empty();
 }
 #endif
@@ -1491,7 +1625,7 @@ Java_com_infinipaint_demo_NativeBridge_cancel(
 
     std::lock_guard<std::mutex> guard(stateMutex);
 
-    if(live.erase(id)) {model->cancelStroke();if(persistent) saves.cancelStroke();}
+    if(live.erase(id)) {retireLivePublication();model->cancelStroke();if(persistent) saves.cancelStroke();}
 }
 
 // --------------------------------------------------
@@ -1507,6 +1641,7 @@ Java_com_infinipaint_demo_NativeBridge_clear(
     std::lock_guard<std::mutex> guard(stateMutex);
 
     live.clear();
+    retireLivePublication();
     saves.cancelStroke();
     if(model) {model->cancelStroke();(void)model->clear(model->revision());}
 }
@@ -1721,85 +1856,50 @@ Java_com_infinipaint_demo_NativeBridge_render(
     }
 
     FrameGrowth growth;
-    struct FramePublication {
-        Scene patches;
-        std::vector<std::pair<uint64_t, ViewTrace>> active;
-        tablet::ViewIntent view;
-        Key head;
-        uint64_t epoch;
-        document::Revision revision;
-    };
-    const auto frame = [&] {
-        FramePublication packet;
-        const int64_t snapshotStartNs = profileNs();
-        std::lock_guard<std::mutex> guard(stateMutex);
-        packet.view = desiredView.latch();
-        packet.epoch = finishedEpoch;
-        packet.revision = sceneRevision;
-        // Epoch mismatch means clear; GL thread will retire old cache below.
-        if(program && buffer) {
-            packet.patches.swap(pendingScene);
-        }
-        packet.head=sceneHead;
-        auto& active=packet.active;
-        active.reserve(live.size());
-
-        for (auto& pair : live) {
-
-            auto& trace = *pair.second;
-
-            ViewTrace view;
-            view.bounds=trace.bounds;
-            view.radiusWorld = trace.rawPeak;
-            view.filteredRadius = trace.cleanPeak;
-            if (mode == 0 || mode == 3)
-                view.raw = snapshotUpload(growth,trace.rawMesh, trace.gpuId, 0);
-            if (mode == 1 || mode == 3)
-                view.clean = snapshotUpload(growth,trace.cleanMesh, trace.gpuId, 1);
-            if (mode == 2 || mode == 3) {
-                view.stable = snapshotUpload(growth,trace.stableMesh, trace.gpuId, 2);
-                view.tail = snapshotUpload(growth,trace.tailMesh, trace.gpuId, 3, trace.tailRevision);
-            }
-            if (trace.cleanPoints.size() >= 2) {
-                view.filteredX = trace.cleanPoints[trace.cleanPoints.size()-2];
-                view.filteredY = trace.cleanPoints.back();
-                view.hasFiltered = true;
-            }
-
-            if (!trace.rawPoints.empty()) {
-
-                view.lastX =
-                        trace.rawPoints[
-                                trace.rawPoints.size() - 2
-                        ];
-
-                view.lastY =
-                        trace.rawPoints.back();
-
-                view.hasLast = true;
-                float pad=std::max(trace.rawPeak,trace.cleanPeak)+1.f/(float)MIN_ZOOM;
-                auto& q=view.bounds;
-                q.minX=std::min(q.minX,std::min(view.lastX,view.filteredX)-pad);
-                q.maxX=std::max(q.maxX,std::max(view.lastX,view.filteredX)+pad);
-                q.minY=std::min(q.minY,std::min(view.lastY,view.filteredY)-pad);
-                q.maxY=std::max(q.maxY,std::max(view.lastY,view.filteredY)+pad);
-            }
-
-            peak(snapshotHigh,(view.raw.data.capacity()+view.clean.data.capacity()+view.stable.data.capacity()+
-                               view.tail.data.capacity())*sizeof(Vertex));
-            active.emplace_back(trace.gpuId, std::move(view));
-        }
-        auditSnapshotNs.fetch_add(profileNs() - snapshotStartNs, std::memory_order_relaxed);
-        auditSnapshotFrames.fetch_add(1, std::memory_order_relaxed);
-        return packet;
-    }();
-
-    // No input mutex is held during OpenGL calls.
-    const auto& newCompleted=frame.patches;
-    const auto& active=frame.active;
+    Scene newCompleted;
+    LiveView retiredView;
+    const auto snapshotStartNs=profileNs();
+    if(program && buffer) {
+        std::unique_lock publish(publicationMutex,std::try_to_lock);
+        publicationRetry=!publish.owns_lock();
+        if(publish.owns_lock()) {
+            // Coalesce head, epoch, revision, patch ownership and live prefix.
+            // Only small handles are copied. No mesh copy or GL call here.
+            renderLatch.view=desiredView.latch();
+            renderLatch.epoch=finishedEpoch;
+            renderLatch.revision=sceneRevision;
+            newCompleted.swap(pendingScene);
+            renderLatch.head=sceneHead;
+            retiredView=std::move(renderLatch.active);
+            renderLatch.active=publishedLive;
+        } else publicationRetries.fetch_add(1,std::memory_order_relaxed);
+    } else {
+        // No valid GPU program: preserve pending patch ownership for recovery.
+        publicationRetry=false;
+        return;
+    }
+    retiredView={}; // destruction outside the port
+    const auto& frame=renderLatch;
     const auto frameHead=frame.head;
     const auto frameEpoch=frame.epoch;
     const double framePanX=frame.view.x, framePanY=frame.view.y, frameZoom=frame.view.zoom;
+    ViewTrace active;
+    const auto& liveView=frame.active;
+    if(liveView.id) {
+        active.bounds=liveView.bounds;active.lastX=liveView.lastX;active.lastY=liveView.lastY;
+        active.filteredX=liveView.filteredX;active.filteredY=liveView.filteredY;
+        active.hasLast=liveView.hasLast;active.hasFiltered=liveView.hasFiltered;
+        active.radiusWorld=liveView.radiusWorld;active.filteredRadius=liveView.filteredRadius;
+        if(mode==0 || mode==3) active.raw=snapshotUpload(growth,liveView.parts[0],liveView.id,0);
+        if(mode==1 || mode==3) active.clean=snapshotUpload(growth,liveView.parts[1],liveView.id,1);
+        if(mode==2 || mode==3) {
+            active.stable=snapshotUpload(growth,liveView.parts[2],liveView.id,2);
+            active.tail=snapshotUpload(growth,liveView.parts[3],liveView.id,3,liveView.tailRevision);
+        }
+    }
+    auditSnapshotNs.fetch_add(profileNs()-snapshotStartNs,std::memory_order_relaxed);
+    auditSnapshotFrames.fetch_add(1,std::memory_order_relaxed);
+    // No input mutex is held during OpenGL calls.
 
     glClearColor(
             0.025f,
@@ -1871,9 +1971,7 @@ Java_com_infinipaint_demo_NativeBridge_render(
 
     // Retire live buffers after a stroke ends/cancels. GL thread owns deletion.
     for (auto it = gpuLive.begin(); it != gpuLive.end();) {
-        bool present = false;
-        for (const auto& entry : active) if (entry.first == it->first) { present = true; break; }
-        if (!present) {
+        if (it->first!=liveView.id) {
             for (auto& part : it->second) if (part.vbo) {
                 gpuRequested.fetch_sub(part.capacityVertices*sizeof(Vertex));glDeleteBuffers(1,&part.vbo);
                 liveVboCharge.fetch_sub(part.capacityVertices*sizeof(Vertex));
@@ -1883,9 +1981,9 @@ Java_com_infinipaint_demo_NativeBridge_render(
     }
 
     // Active strokes use the same mapping as completed strokes.
-    for (auto& entry : active) {
-        const uint64_t strokeId = entry.first;
-        auto& trace = entry.second;
+    if(liveView.id) {
+        const uint64_t strokeId=liveView.id;
+        auto& trace=active;
         auto tip=[&](bool connector,float r,float g,float b) {
             if(!trace.hasLast) return;
             Mesh dot;
@@ -1965,7 +2063,7 @@ Java_com_infinipaint_demo_NativeBridge_render(
                             (double)windowUploads / PROFILE_FRAME_WINDOW / 1024.0,
                             (double)windowCacheUploads / PROFILE_FRAME_WINDOW / 1024.0,
                             (double)windowLiveUploads / PROFILE_FRAME_WINDOW / 1024.0,
-                            gpuFinished.size(), gpuFinished.size(), active.size(), (int)mode);
+                            gpuFinished.size(), gpuFinished.size(), size_t(liveView.id!=0), (int)mode);
         __android_log_print(ANDROID_LOG_INFO, "IP_VIEW_CULL",
             "total_finished=%zu visible_finished=%llu mode=%d",
             gpuFinished.size(), (unsigned long long)visibleCompleted, (int)mode);
@@ -1991,12 +2089,21 @@ Java_com_infinipaint_demo_NativeBridge_render(
     }
 }
 
+JNIEXPORT jboolean JNICALL Java_com_infinipaint_demo_NativeBridge_needsPublicationRetry(JNIEnv*,jclass) {
+    return publicationRetry?JNI_TRUE:JNI_FALSE;
+}
+
 } // extern "C"
 
 namespace engine::tablet {
 #ifndef __ANDROID__
 std::array<uint64_t,2> hostOwnerCharges(){return {sceneOwners.load(),liveVboCharge.load()};}
 const void* hostFirstRetiringMesh(){return gpuFinished.begin()->second.source[2]->data();}
+void hostLockMutation(){stateMutex.lock();}
+void hostUnlockMutation(){stateMutex.unlock();}
+void hostLockPublication(){publicationMutex.lock();}
+void hostUnlockPublication(){publicationMutex.unlock();}
+uint64_t hostLivePublicationBytes(){return livePublicationBytes.load();}
 #endif
 void setPhysicalSlice(size_t bytes) {physicalSlice.store(bytes);}
 bool admitIncoming(size_t count,size_t bytes) {
@@ -2036,6 +2143,7 @@ void activate(double x,double y,double zoom) noexcept {
     Scene retired;
     {
         std::lock_guard guard(stateMutex);
+        std::lock_guard publish(publicationMutex);
         model.swap(stagedModel);
         finished.swap(stagedScene);
         retired.swap(pendingScene);

@@ -14,8 +14,14 @@
 #include <cstring>
 #include <new>
 #include <functional>
+#include <future>
+#include <thread>
 #include "tablet/session.hpp"
-namespace engine::tablet {std::array<uint64_t,2> hostOwnerCharges();const void* hostFirstRetiringMesh();}
+namespace engine::tablet {
+std::array<uint64_t,2> hostOwnerCharges();const void* hostFirstRetiringMesh();
+void hostLockMutation();void hostUnlockMutation();void hostLockPublication();void hostUnlockPublication();
+uint64_t hostLivePublicationBytes();
+}
 static std::function<void()> parkedDraw,parkedSnapshot;
 static const void* watchedFree=nullptr;
 static std::function<void()> beforeFree;
@@ -47,6 +53,7 @@ void Java_com_infinipaint_demo_NativeBridge_clear(JNIEnv*,jclass);
 void Java_com_infinipaint_demo_NativeBridge_suspend(JNIEnv*,jclass,jboolean);
 jint Java_com_infinipaint_demo_NativeBridge_command(JNIEnv*,jclass,jint,jdoubleArray,jdouble);
 void Java_com_infinipaint_demo_NativeBridge_render(JNIEnv*,jclass,jint);
+jboolean Java_com_infinipaint_demo_NativeBridge_needsPublicationRetry(JNIEnv*,jclass);
 }
 static unsigned nextId=1;
 static uint64_t transferBytes=0, bufferAllocs=0, draws=0;
@@ -157,6 +164,44 @@ int main(int argc,char** argv){
     auto sample=[](int n,double timestamp){return Java_com_infinipaint_demo_NativeBridge_sample(nullptr,nullptr,1,
         100+3*n,250+25*std::sin(n*0.13),timestamp,0.6f,0,0)==JNI_TRUE;};
     auto resize=[](int w,int h){Java_com_infinipaint_demo_NativeBridge_resizeViewport(nullptr,nullptr,w,h);};
+    if(argc>1 && std::string_view(argv[1])=="isolation") {
+        using namespace engine::tablet;
+        using namespace std::chrono_literals;
+        auto camera=[](double x){Java_com_infinipaint_demo_NativeBridge_setCamera(nullptr,nullptr,x,0,1);};
+        auto retry=[](){return Java_com_infinipaint_demo_NativeBridge_needsPublicationRetry(nullptr,nullptr)==JNI_TRUE;};
+        auto begin=[](){check(Java_com_infinipaint_demo_NativeBridge_begin(nullptr,nullptr,1,2),"isolation begin");};
+        auto end=[](){check(Java_com_infinipaint_demo_NativeBridge_end(nullptr,nullptr,1),"isolation end");};
+        auto feed=[&](int a,int b){for(int i=a;i<b;++i)check(sample(i,1+i*.01),"isolation sample");};
+        Java_com_infinipaint_demo_NativeBridge_contextCreated(nullptr,nullptr);resize(1200,800);
+        camera(0);begin();feed(0,150);end();render(0);
+        const auto committed=drawnVertices();
+        // Mock GL can execute on another thread; no concurrent GPU calls.
+        // Keep a real writer lock held until the render future finishes.
+        auto whileLocked=[&](auto lock,auto unlock) {
+            lock();
+            auto result=std::async(std::launch::async,[&]{render(0);});
+            bool completed=result.wait_for(2s)==std::future_status::ready;
+            unlock();result.get();check(completed,"render waited for a held writer lock");
+        };
+        camera(8);whileLocked(hostLockMutation,hostUnlockMutation);
+        check(!retry() && uniformPanX==8 && drawnVertices()==committed,"camera/scene latch while mutable state parked");
+        camera(16);whileLocked(hostLockPublication,hostUnlockPublication);
+        check(retry() && uniformPanX==8 && drawnVertices()==committed,"contended port retained prior coherent latch");
+        render(0);check(!retry() && uniformPanX==16,"retry consumed latest camera then returned to idle");
+        // The port must not consume a new append until the complete packet is
+        // available; a producer can extend and seal while GL draws old pages.
+        camera(0);Java_com_infinipaint_demo_NativeBridge_clear(nullptr,nullptr);
+        begin();feed(0,180);render(0);
+        auto oldSize=hostLivePublicationBytes();check(oldSize>0,"live page credit");
+        parkedSnapshot=[&]{feed(180,360);end();check(hostLivePublicationBytes()>0,"parked immutable prefix still charged");};
+        draws=0;render(0);check(draws==2,"old live prefix and tip drawn once while writer seals");
+        draws=0;render(0);check(draws==1 && hostLivePublicationBytes()==0,"commit atomically replaced live prefix");
+        auto actual=drawnVertices();
+        Java_com_infinipaint_demo_NativeBridge_contextCreated(nullptr,nullptr);render(0);
+        check(actual==drawnVertices(),"sealed geometry equals full context rebuild");
+        std::puts("PASS M04.3-B: parked mutation, contended publication, retry, live/commit handoff, context rebuild");
+        return 0;
+    }
     if(argc>1 && std::string_view(argv[1])=="owners") {
         using namespace engine::tablet;
         using namespace engine::document;
@@ -213,11 +258,12 @@ int main(int argc,char** argv){
         Java_com_infinipaint_demo_NativeBridge_suspend(nullptr,nullptr,false);
         check(Java_com_infinipaint_demo_NativeBridge_begin(nullptr,nullptr,1,2),"live begin");
         for(int i=0;i<128;++i) check(sample(i,1+i*.01),"live sample");
-        uint64_t held=0;size_t room=0;
+        uint64_t held=0,mirrorHeld=0;size_t room=0;
         parkedSnapshot=[&] {
             held=hostOwnerCharges()[1];check(held>0,"snapshot reserved pending live VBO growth");
             Java_com_infinipaint_demo_NativeBridge_cancel(nullptr,nullptr,1);
             check(hostOwnerCharges()[1]==held,"cancel before GL upload kept reservation");
+            mirrorHeld=hostLivePublicationBytes();check(mirrorHeld>0,"old latch retains mirror charge after cancellation");
             size_t lo=0,hi=1024*mib;
             while(hi-lo>1){size_t mid=(hi+lo)/2;if(admitIncoming(0,mid)) lo=mid;else hi=mid;}
             room=lo;
@@ -225,8 +271,9 @@ int main(int argc,char** argv){
         render(3);
         check(held && hostOwnerCharges()[1]==held && !admitIncoming(0,room+1),"canceled uploaded VBOs block admission");
         render(3);
-        check(hostOwnerCharges()[1]==0 && admitIncoming(0,room+held) && !admitIncoming(0,room+held+1),
-                "exact canceled VBO capacity released at GL deletion");
+        check(hostOwnerCharges()[1]==0 && hostLivePublicationBytes()==0 &&
+              admitIncoming(0,room+held+mirrorHeld) && !admitIncoming(0,room+held+mirrorHeld+1),
+                "exact canceled VBO and live mirror credits released after next latch");
         auto livePrefix=[&] {
             check(Java_com_infinipaint_demo_NativeBridge_begin(nullptr,nullptr,1,2),"begin live prefix");
             for(int i=0;i<128;++i) check(sample(i,1+i*.01),"prefix sample");

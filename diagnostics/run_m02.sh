@@ -15,10 +15,13 @@ build diagnostics/replay.cpp "$c"/input/*.cpp "$c"/stroke/spline.cpp -o "$t/repl
 for f in diagnostics/synthetic*.csv; do "$t/replay" "$f" "$t/$(basename "$f")"; done
 fi
 if [ "${1:-all}" != pixels ]; then
-build -I"$t" -Idiagnostics/test_support diagnostics/renderer_smoke.cpp "$c/native_bridge.cpp" "$c"/document/*.cpp \
+build -pthread -I"$t" -Idiagnostics/test_support diagnostics/renderer_smoke.cpp "$c/native_bridge.cpp" "$c"/document/*.cpp \
   "$c"/input/*.cpp "$c/stroke/spline.cpp" -o "$t/smoke"
 "$t/smoke"
 "$t/smoke" owners
+"$t/smoke" isolation
+build -pthread diagnostics/m04_live_prefix_test.cpp -o "$t/live_prefix"
+"$t/live_prefix"
 if [ "${1:-all}" = owners ]; then exit; fi
 "$t/smoke" bench
 c++ -std=c++20 -O2 -I"$c" diagnostics/spline_scaling.cpp "$c/stroke/spline.cpp" -o "$t/scaling"

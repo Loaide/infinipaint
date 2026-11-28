@@ -101,7 +101,7 @@ public final class MainActivity extends Activity implements EditorStore.Listener
         if(args!=null && args.length==1 && "ip-document".equals(args[0])) {
             out.println(prefix+(documents==null?"Not open":documents.status()));
             out.println(prefix+"bytes [uniqueInk,canonicalCharge,retainedMeshes,active,penUpScratchPeak,gpuVbo,"+
-                    "gpuVboPeak,historyCharge,saveCharge,savePeak,restoreObservedPeak,uploadScratchPeak,pendingIds] "+
+                    "gpuVboPeak,historyCharge,saveCharge,savePeak,restoreObservedPeak,uploadScratchPeak,pendingIds,livePublicationCharge,livePublicationChargePeak,publicationRetries] "+
                     java.util.Arrays.toString(NativeBridge.memory()));
             return;
         }
@@ -678,6 +678,9 @@ public final class MainActivity extends Activity implements EditorStore.Listener
                     runOnUiThread(() -> { if (running) updateStatus(); });
                 }
                 frames.callbackFinished(System.nanoTime()-entryNs);
+                // A contended publication never blocks GL. Retry until the
+                // next coherent patch is latched, then return to idle.
+                if (NativeBridge.needsPublicationRetry()) requestCanvasRender(FrameTelemetry.Reason.OTHER);
             }
         });
 
