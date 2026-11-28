@@ -25,6 +25,7 @@ public final class NativeBridge {
  public static native void resizeViewport(int width,int height);
  public static native void render(int mode);
  static native boolean needsPublicationRetry();
+ static native long[] plannerCounters();
 
 
 }

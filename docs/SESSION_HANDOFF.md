@@ -2,6 +2,10 @@
 
 `feature/m04-scalable-renderer`, inspected `2af1a8fc4a5df3e777027d4a6c946f00515a159e`. Owner selected native Vulkan with compact instancing for the reference tablet. Preserve GLES2/v1 and ADR-013. See [selection and fidelity requirement](../reports/M04_BACKEND_GATE.md). Next: isolated publication and editing, not another diagnostic campaign. No device authorization.
 
+## M04.3-C — Bounded execution scheduling (functionally verified)
+
+Source `115390a56a89907e0053b4d8a060129c73c2d428`. Ordered multi-gesture ink admission, paused prefix recovery, resident visibility planner, bounded delta and retirement transfer. See [scope, tests and acceptance](../reports/M04_3_EXECUTION_SCHEDULING.md). Android build and 11/11 tablet checks passed; exact resident fallback remains until spatial streaming. No Vulkan migration.
+
 ## M04.3-B — Render publication isolation (functionally verified)
 
 Owner archive `6018eac32e31f094a6ce6b74c9d7a4b328c07b60`, branch `feature/m04-scalable-renderer`. Separate publication port and immutable live pages implemented; GL no longer acquires mutation mutex. Prior latch retained/retried on publication contention. See [report and exact limits](../reports/M04_3_RENDER_PUBLICATION.md). Host mock, ownership, concurrency and Mesa pixel tests passed; Android build and 9/9 tablet checks passed. No production Vulkan migration, no full M04.3 acceptance. Next: M04.3-C bounded admission, scheduling and retirement.

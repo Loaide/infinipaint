@@ -17,6 +17,8 @@
 #include <mutex>
 #include <unordered_map>
 #include <vector>
+#include <thread>
+#include "tablet/frame_scheduler.hpp"
 
 #include "input/input_processor.hpp"
 #include "document/document.hpp"
@@ -69,13 +71,13 @@ namespace {
     std::atomic<uint64_t> retainedMeshes{0},activeHigh{0},switchHigh{0},gpuRequested{0},gpuHigh{0};
     std::atomic<uint64_t> historyCharge{0},queueHigh{0},canonicalCharge{0};
     std::atomic<uint64_t> physicalSlice{0},sceneOwners{0},candidateNodes{0},liveVboCharge{0};
-    std::atomic<uint64_t> livePublicationBytes{0},livePublicationHigh{0},publicationRetries{0};
+    std::atomic<uint64_t> livePublicationBytes{0},livePublicationHigh{0},publicationRetries{0},plannerFixedCharge{0};
     bool admits(uint64_t activeMesh,uint64_t samples,uint64_t decoding=0,uint64_t extraNodes=0) {
         const auto slice=physicalSlice.load(std::memory_order_relaxed);
         if(!slice) return true; // host renderer fixtures have no Android process
         return document::WorkingSet::forSlice(slice).admits(document::Ink::liveBytes.load(),
                 retainedMeshes.load(),sceneOwners.load()+candidateNodes.load()+4+extraNodes,
-                activeMesh,samples,decoding+livePublicationBytes.load(),liveVboCharge.load());
+                activeMesh,samples,decoding+livePublicationBytes.load()+plannerFixedCharge.load(),liveVboCharge.load());
     }
     // Count allocations, not map sizes sampled at publication boundaries. swap
     // and node-handle merge transfer ownership without changing this ledger.
@@ -274,11 +276,12 @@ namespace {
     // Lock order: state -> publication -> view; GL try-locks publication.
     std::mutex publicationMutex;
     LiveView publishedLive;
+    uint64_t livePublicationSequence=0;
     struct RenderLatch {
         LiveView active;
         tablet::ViewIntent view;
         Key head=0;
-        uint64_t epoch=0;
+        uint64_t epoch=0, liveSequence=0;
         document::Revision revision=0;
     };
     RenderLatch renderLatch; // GL-owned; keep prior coherent latch on contention
@@ -289,7 +292,7 @@ namespace {
     }
     void retireLivePublication() {
         LiveView retired;
-        {std::lock_guard guard(publicationMutex); std::swap(retired,publishedLive);}
+        {std::lock_guard guard(publicationMutex); std::swap(retired,publishedLive);++livePublicationSequence;}
     }
     document::Revision sceneRevision=0; // belongs to the published head + patch, not the save worker
     size_t sceneBytes=0,sceneLimit=SIZE_MAX,canonicalLimit=SIZE_MAX;
@@ -344,6 +347,161 @@ namespace {
 
     int width = 1;
     int height = 1;
+
+    // Transitional v1 visibility planner. The GL owner transfers already
+    // applied immutable deltas; the worker merges node handles (no full scene
+    // copy), retires CPU references, and prepares exact ordered visible IDs.
+    // GL can always render its complete resident v1 scene directly if the
+    // plan is absent/stale. Spatial streaming will replace this linear query.
+    struct PlanStamp {
+        uint64_t epoch=0;
+        document::Revision revision=0;
+        Key head=0;
+        tablet::ViewIntent view;
+        bool same(const PlanStamp& other) const noexcept {
+            return epoch==other.epoch && revision==other.revision && head==other.head &&
+                view.sequence==other.view.sequence && view.mappingGeneration==other.view.mappingGeneration &&
+                view.width==other.view.width && view.height==other.view.height;
+        }
+    };
+    struct SceneDelta {
+        Scene rows;
+        uint64_t epoch=0;
+        document::Revision revision=0;
+        Key head=0;
+    };
+    constexpr size_t visiblePlanLimit=65536;
+    struct VisiblePlan {
+        PlanStamp stamp;
+        std::array<Key,visiblePlanLimit> ids;
+        size_t count=0;
+        bool valid=false;
+    };
+    struct FramePlanner {
+        tablet::SpscSlot<SceneDelta> deltas;
+        tablet::SpscRing<LiveView,8> retiredLive;
+        tablet::LatestTriple<VisiblePlan> plans;
+        tablet::WakeGate wake;
+        std::atomic<bool> enabled{false},stopping{false};
+        bool attempted=false; // GL owner, one startup attempt per process
+        std::thread worker;
+        std::atomic<uint64_t> hits{0},fallbacks{0},cancelled{0},built{0},backpressure{0},invalid{0},retired{0};
+#ifndef __ANDROID__
+        std::atomic<bool> testPark{false},testParked{false};
+        bool testForceFallback=false; // GL test owner only
+        std::binary_semaphore testRelease{0};
+#endif
+        void start() noexcept {
+            if(attempted) return;
+            attempted=true;
+            // Fixed triple buffer/ring charge plus existing map-node charges.
+            // If the reserved plan storage cannot fit, retain exact v1 path.
+            if(!admits(0,0,sizeof(FramePlanner))) return;
+            plannerFixedCharge.store(sizeof(FramePlanner));
+            try {worker=std::thread([this]{run();});enabled.store(true,std::memory_order_release);}
+            catch(...) {plannerFixedCharge.store(0);}
+        }
+        ~FramePlanner() {
+            if(worker.joinable()) {
+                stopping.store(true);wake.signal();
+#ifndef __ANDROID__
+                if(testPark.exchange(false)) testRelease.release();
+#endif
+                worker.join();
+            }
+        }
+        void request() noexcept {if(enabled.load(std::memory_order_acquire)) wake.signal();}
+        void submit(Scene& rows,const RenderLatch& frame) noexcept {
+            // canPush was checked before consuming the publication. Only GL
+            // produces these batches, and the worker can only free capacity.
+            // Swap with the preconstructed slot; no map allocation here.
+            if(!deltas.push([&](SceneDelta& delta) noexcept {
+                assert(delta.rows.empty());delta.rows.swap(rows);
+                delta.epoch=frame.epoch;delta.revision=frame.revision;delta.head=frame.head;
+            })) std::terminate();
+            wake.signal();
+        }
+        void retire(LiveView&& view) noexcept {
+            if(!retiredLive.push(std::move(view))) std::terminate();
+            wake.signal();
+        }
+        void drainRetired() noexcept {
+            for(size_t i=0;i<8;++i) {auto old=retiredLive.pop();if(!old)break;old.reset();++retired;}
+        }
+        bool obsolete(const PlanStamp& stamp) const noexcept {
+            return stopping.load() || deltas.hasData() || desiredView.latch().sequence!=stamp.view.sequence;
+        }
+        void run() noexcept {
+            Scene scene; // sole planner owner, existing SceneAllocator ledger
+            SceneDelta delta;
+            auto takeDelta=[&]() noexcept {return deltas.pop([&](SceneDelta& slot) noexcept {
+                assert(delta.rows.empty());delta.rows.swap(slot.rows);
+                delta.epoch=slot.epoch;delta.revision=slot.revision;delta.head=slot.head;
+            });};
+            PlanStamp stamp,last;
+            bool haveLast=false;
+            while(true) {
+                wake.wait();
+                if(stopping.load()) break;
+#ifndef __ANDROID__
+                if(testPark.load()) {testParked.store(true);testRelease.acquire();testParked.store(false);}
+                if(stopping.load()) break;
+#endif
+                if(takeDelta()) {
+                    if(stamp.epoch!=delta.epoch) scene.clear();
+                    for(auto it=delta.rows.begin();it!=delta.rows.end();) {
+                        scene.erase(it->first);
+                        if(!it->second.shape) it=delta.rows.erase(it);else ++it;
+                    }
+                    scene.merge(delta.rows);
+                    stamp.epoch=delta.epoch;stamp.revision=delta.revision;stamp.head=delta.head;
+                }
+                drainRetired();
+                stamp.view=desiredView.latch();
+                if(haveLast && stamp.same(last)) continue;
+                auto& plan=plans.write();plan.stamp=stamp;plan.count=0;plan.valid=false;
+                const double minX=(float)stamp.view.x,minY=(float)stamp.view.y;
+                const double maxX=minX+stamp.view.width/(double)(float)stamp.view.zoom;
+                const double maxY=minY+stamp.view.height/(double)(float)stamp.view.zoom;
+                size_t visited=0;Key id=stamp.head;bool bad=false,aborted=false;
+                while(id) {
+                    if((visited&127)==0) {
+                        drainRetired();
+                        if(obsolete(stamp)) {aborted=true;break;}
+                    }
+                    auto it=scene.find(id);
+                    if(it==scene.end() || ++visited>scene.size() || !it->second.shape) {bad=true;break;}
+                    const auto& b=*it->second.shape;
+                    if(!(b.maxX<minX || b.minX>maxX || b.maxY<minY || b.minY>maxY)) {
+                        if(plan.count==plan.ids.size()) {bad=true;break;}
+                        plan.ids[plan.count++]=id;
+                    }
+                    id=it->second.next;
+                }
+                if(aborted || obsolete(stamp)) {++cancelled;continue;}
+                plan.valid=!bad && visited==scene.size();
+                if(!plan.valid) ++invalid;
+                plans.publish();last=stamp;haveLast=true;++built;
+            }
+            // All CPU references in this lane are released on its own thread.
+            if(takeDelta()) delta.rows.clear();
+            drainRetired();
+        }
+        const VisiblePlan* latch(const RenderLatch& frame,int w,int h) noexcept {
+            if(!enabled.load(std::memory_order_acquire)) return nullptr;
+            const auto& plan=plans.latch();
+#ifndef __ANDROID__
+            if(testForceFallback) {++fallbacks;return nullptr;}
+#endif
+            PlanStamp wanted{frame.epoch,frame.revision,frame.head,frame.view};
+            if(!plan.valid || !plan.stamp.same(wanted) || frame.view.width!=w || frame.view.height!=h) {
+                ++fallbacks;return nullptr;
+            }
+            return &plan;
+        }
+    };
+    FramePlanner planner;
+
 
     GLuint program = 0;
     GLuint buffer = 0;
@@ -686,7 +844,7 @@ void main() {
             q.maxY=std::max(q.maxY,std::max(next.lastY,next.filteredY)+pad);
         }
         // Swap, then release obsolete handles outside the port.
-        {std::lock_guard guard(publicationMutex);std::swap(next,publishedLive);}
+        {std::lock_guard guard(publicationMutex);std::swap(next,publishedLive);++livePublicationSequence;}
     }
 
 // --------------------------------------------------
@@ -1124,7 +1282,7 @@ Java_com_infinipaint_demo_NativeBridge_setCamera(
         return;
     }
 
-    desiredView.publish(panX,panY,std::clamp((double)zoom,MIN_ZOOM,MAX_ZOOM));
+    desiredView.publish(panX,panY,std::clamp((double)zoom,MIN_ZOOM,MAX_ZOOM));planner.request();
 }
 
 JNIEXPORT void JNICALL
@@ -1401,7 +1559,7 @@ Java_com_infinipaint_demo_NativeBridge_end(
     const size_t rawSamples=trace.rawPoints.size()/2, cleanSamples=trace.cleanPoints.size()/2;
     auto retired=std::move(it->second);
     live.erase(it);
-    std::swap(retiredPublication,publishedLive);
+    std::swap(retiredPublication,publishedLive);++livePublicationSequence;
     publish.unlock();
     const auto held=profileNs()-lockStart;
     guard.unlock();
@@ -1660,13 +1818,16 @@ Java_com_infinipaint_demo_NativeBridge_resizeViewport(
 
     width = std::max(1, (int)w);
     height = std::max(1, (int)h);
-    desiredView.viewport(width,height);
+    desiredView.viewport(width,height);planner.request();
 
     glViewport(0, 0, width, height);
 }
 
 JNIEXPORT void JNICALL
 Java_com_infinipaint_demo_NativeBridge_contextCreated(JNIEnv*, jclass) {
+#ifdef __ANDROID__
+    planner.start();
+#endif
     // Old EGL context already owns/disposes its objects. The same numeric
     // names may identify unrelated objects in the newly current context.
     // Topology and immutable CPU sources survive EGL loss. Never reuse/delete
@@ -1858,27 +2019,42 @@ Java_com_infinipaint_demo_NativeBridge_render(
     FrameGrowth growth;
     Scene newCompleted;
     LiveView retiredView;
+    bool submitDelta=false;
+    const bool planning=planner.enabled.load(std::memory_order_acquire);
     const auto snapshotStartNs=profileNs();
     if(program && buffer) {
         std::unique_lock publish(publicationMutex,std::try_to_lock);
         publicationRetry=!publish.owns_lock();
         if(publish.owns_lock()) {
-            // Coalesce head, epoch, revision, patch ownership and live prefix.
-            // Only small handles are copied. No mesh copy or GL call here.
-            renderLatch.view=desiredView.latch();
-            renderLatch.epoch=finishedEpoch;
-            renderLatch.revision=sceneRevision;
-            newCompleted.swap(pendingScene);
-            renderLatch.head=sceneHead;
-            retiredView=std::move(renderLatch.active);
-            renderLatch.active=publishedLive;
+            const bool sceneChanged=renderLatch.epoch!=finishedEpoch || renderLatch.revision!=sceneRevision ||
+                renderLatch.head!=sceneHead || !pendingScene.empty();
+            const bool liveChanged=renderLatch.liveSequence!=livePublicationSequence;
+            const bool full=planning && ((sceneChanged && !planner.deltas.canPush()) ||
+                (liveChanged && renderLatch.active.id && !planner.retiredLive.canPush()));
+            if(full) {
+                // Keep the entire previous coherent scene/live latch. Camera
+                // may still reproject that scene if it is the same document.
+                publicationRetry=true;++planner.backpressure;
+                if(renderLatch.epoch==finishedEpoch) renderLatch.view=desiredView.latch();
+            } else {
+                renderLatch.view=desiredView.latch();
+                renderLatch.epoch=finishedEpoch;
+                renderLatch.revision=sceneRevision;
+                newCompleted.swap(pendingScene);
+                renderLatch.head=sceneHead;
+                if(liveChanged) {
+                    retiredView=std::move(renderLatch.active);
+                    renderLatch.active=publishedLive;
+                    renderLatch.liveSequence=livePublicationSequence;
+                }
+                submitDelta=planning && sceneChanged;
+            }
         } else publicationRetries.fetch_add(1,std::memory_order_relaxed);
     } else {
-        // No valid GPU program: preserve pending patch ownership for recovery.
-        publicationRetry=false;
-        return;
+        publicationRetry=false;return;
     }
-    retiredView={}; // destruction outside the port
+    if(planning && retiredView.id) planner.retire(std::move(retiredView));
+    else retiredView={}; // fallback destruction outside the publication port
     const auto& frame=renderLatch;
     const auto frameHead=frame.head;
     const auto frameEpoch=frame.epoch;
@@ -1944,15 +2120,13 @@ Java_com_infinipaint_demo_NativeBridge_render(
         auto& node=gpuFinished.at(id);
         node.following=node.next?&gpuFinished.at(node.next):nullptr;
     }
+    if(submitDelta) planner.submit(newCompleted,frame);
     // Cull in the same quantized viewport used by the existing float shader.
     const double viewMinX = (float)framePanX, viewMinY = (float)framePanY;
     const double viewMaxX = viewMinX + width/(double)(float)frameZoom;
     const double viewMaxY = viewMinY + height/(double)(float)frameZoom;
     uint64_t visibleCompleted = 0;
-    for (auto* node=frameHead?&gpuFinished.at(frameHead):nullptr;node;node=node->following) {
-        auto& cached=*node;
-        if (cached.maxX < viewMinX || cached.minX > viewMaxX ||
-            cached.maxY < viewMinY || cached.minY > viewMaxY) continue;
+    auto drawCompleted=[&](CachedGpuStroke& cached) {
         ++visibleCompleted;
         auto drawPart = [&](int part, float r, float g, float b) {
             if(part==2) {r=cached.rgba[0];g=cached.rgba[1];b=cached.rgba[2];}
@@ -1966,6 +2140,21 @@ Java_com_infinipaint_demo_NativeBridge_render(
             drawPart(2, 0.28f, 0.58f, 1.0f);
             drawPart(1, 1.0f, 0.76f, 0.20f);
             drawPart(0, 0.20f, 0.95f, 0.78f);
+        }
+    };
+    const auto* plan=planner.latch(frame,width,height);
+    // Validate all IDs before drawing anything. A stale/malformed plan never
+    // produces a partly drawn scene; exact resident v1 traversal is the oracle.
+    if(plan && std::all_of(plan->ids.begin(),plan->ids.begin()+plan->count,
+                          [](Key id){return gpuFinished.contains(id);})) {
+        ++planner.hits;
+        for(size_t i=0;i<plan->count;++i) drawCompleted(gpuFinished.at(plan->ids[i]));
+    } else {
+        if(plan) ++planner.fallbacks;
+        for(auto* node=frameHead?&gpuFinished.at(frameHead):nullptr;node;node=node->following) {
+            auto& cached=*node;
+            if(cached.maxX<viewMinX || cached.minX>viewMaxX || cached.maxY<viewMinY || cached.minY>viewMaxY) continue;
+            drawCompleted(cached);
         }
     }
 
@@ -2089,6 +2278,13 @@ Java_com_infinipaint_demo_NativeBridge_render(
     }
 }
 
+JNIEXPORT jlongArray JNICALL Java_com_infinipaint_demo_NativeBridge_plannerCounters(JNIEnv* env,jclass) {
+    std::array<jlong,9> a{jlong(planner.enabled.load()),jlong(planner.hits.load()),jlong(planner.fallbacks.load()),
+        jlong(planner.built.load()),jlong(planner.cancelled.load()),jlong(planner.invalid.load()),
+        jlong(planner.backpressure.load()),jlong(planner.retired.load()),jlong(plannerFixedCharge.load())};
+    auto arr=env->NewLongArray(a.size());if(arr) env->SetLongArrayRegion(arr,0,a.size(),a.data());return arr;
+}
+
 JNIEXPORT jboolean JNICALL Java_com_infinipaint_demo_NativeBridge_needsPublicationRetry(JNIEnv*,jclass) {
     return publicationRetry?JNI_TRUE:JNI_FALSE;
 }
@@ -2104,6 +2300,13 @@ void hostUnlockMutation(){stateMutex.unlock();}
 void hostLockPublication(){publicationMutex.lock();}
 void hostUnlockPublication(){publicationMutex.unlock();}
 uint64_t hostLivePublicationBytes(){return livePublicationBytes.load();}
+void hostStartPlanner(){planner.start();}
+void hostForcePlannerFallback(bool force){planner.testForceFallback=force;}
+std::array<uint64_t,8> hostPlannerStats(){return {planner.enabled.load(),planner.hits.load(),planner.fallbacks.load(),planner.built.load(),planner.cancelled.load(),planner.invalid.load(),planner.backpressure.load(),planner.retired.load()};}
+void hostParkPlanner(){planner.testPark.store(true);planner.request();}
+bool hostPlannerParked(){return planner.testParked.load();}
+void hostResumePlanner(){planner.testPark.store(false);planner.testRelease.release();}
+
 #endif
 void setPhysicalSlice(size_t bytes) {physicalSlice.store(bytes);}
 bool admitIncoming(size_t count,size_t bytes) {
@@ -2151,7 +2354,7 @@ void activate(double x,double y,double zoom) noexcept {
         sceneHead=model->first();
         sceneRevision=model->revision();
         sceneBytes=stagedBytes;sceneLimit=stagedLimit;canonicalLimit=stagedCanonicalLimit;
-        desiredView.publish(x,y,zoom);
+        desiredView.publish(x,y,zoom);planner.request();
         ++finishedEpoch; persistent=true;
         model->observe(&sceneSink);
         visibleRevision.store(model->revision());

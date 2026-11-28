@@ -44,3 +44,7 @@ This test checks native CPU/GPU API call contracts, but a mock cannot detect act
 ## Project scope
 
 The Android diagnostic test is not the production InfinitePaper/InfiniPaint engine. Its existing GLES 2 and float world-coordinate shader differ from the approved production GLES 3 provisional / camera-relative coordinate architecture. No architecture decision was changed and no GitHub code was modified by this corrective ZIP.
+
+## M04.3-C host scheduling checks
+
+`sh diagnostics/run_renderer_smoke.sh` runs mock bridge/ownership, planner, live prefix, scheduler and Java queue/pipeline regressions (set JAVA_HOME to host JDK 17+). `IP_PLAN_TEST=1 sh diagnostics/run_m02.sh pixels` enables exact resident/planner comparisons in both GLES2 coverage modes. NDK_HEADERS and Mesa setup remain as above. These tests are separate from Android Gradle unit tests.

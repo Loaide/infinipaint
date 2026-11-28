@@ -7,6 +7,17 @@ final class InkLane {
     private final Runnable[] ring;
     private int head, size, highWater;
     private long rejected;
+    // One out-of-band resolution slot. Only the consumer pauses/resumes;
+    // the producer can enqueue a resolution while the FIFO is parked.
+    private boolean paused;
+    private Runnable resolution;
+    synchronized void pause() {paused=true;}
+    synchronized void resume() {paused=false;notifyAll();}
+    synchronized boolean resolve(Runnable work) {
+        if(!paused || resolution!=null) return false;
+        resolution=work;notifyAll();return true;
+    }
+    synchronized boolean isPaused() {return paused;}
     InkLane(int capacity) {
         if (capacity < 2) throw new IllegalArgumentException();
         ring = new Runnable[capacity];
@@ -21,7 +32,10 @@ final class InkLane {
     }
     synchronized long[] counters() {return new long[]{size,highWater,rejected};}
     private synchronized Runnable take() throws InterruptedException {
-        while (size == 0) wait();
+        while (paused ? resolution==null : size==0) wait();
+        if(paused) {
+            Runnable work=resolution; resolution=null;return work;
+        }
         Runnable work = ring[head];
         ring[head] = null;
         head = (head + 1) % ring.length;

@@ -5,6 +5,8 @@
 - M04: [direction approved in principle with conditions](M04_PROPOSAL.md); HOST_02 findings accepted; [M04.2 bounded host data feasibility](../reports/M04_2_DATA_ACCESS.md) complete. Production M04.3 work in progress; [renderer isolation candidate](../reports/M04_3_RENDER_PUBLICATION.md) host and tablet functionally verified.
 - M05, M06 and M07: upcoming.
 
+M04.3-C [functionally verified scheduling implementation](../reports/M04_3_EXECUTION_SCHEDULING.md): multi-gesture admission, bounded resident planning and CPU retirement. Android build and 11/11 tablet checks passed. Exact resident fallback remains; full M04.3 and scalability gates open.
+
 See [M03 formal acceptance](../reports/M03_ACCEPTED.md).
 
 Backend selection closed by owner: native Vulkan + compact instances for SM-X626B. M04.3 authorized; retain GLES2/v1. Diagnostic capacity, sustained pacing and three same-backend recovery stages passed, not production certification. Landscape fidelity and physical peaks remain open.

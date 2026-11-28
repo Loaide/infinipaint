@@ -21,6 +21,9 @@ namespace engine::tablet {
 std::array<uint64_t,2> hostOwnerCharges();const void* hostFirstRetiringMesh();
 void hostLockMutation();void hostUnlockMutation();void hostLockPublication();void hostUnlockPublication();
 uint64_t hostLivePublicationBytes();
+void hostStartPlanner();void hostForcePlannerFallback(bool);
+std::array<uint64_t,8> hostPlannerStats();
+void hostParkPlanner();bool hostPlannerParked();void hostResumePlanner();
 }
 static std::function<void()> parkedDraw,parkedSnapshot;
 static const void* watchedFree=nullptr;
@@ -164,6 +167,46 @@ int main(int argc,char** argv){
     auto sample=[](int n,double timestamp){return Java_com_infinipaint_demo_NativeBridge_sample(nullptr,nullptr,1,
         100+3*n,250+25*std::sin(n*0.13),timestamp,0.6f,0,0)==JNI_TRUE;};
     auto resize=[](int w,int h){Java_com_infinipaint_demo_NativeBridge_resizeViewport(nullptr,nullptr,w,h);};
+    if(argc>1 && std::string_view(argv[1])=="planner") {
+        using namespace engine::tablet;
+        using namespace std::chrono_literals;
+        auto wait=[&](auto ready,const char* why) {
+            auto deadline=std::chrono::steady_clock::now()+5s;
+            while(!ready()) {check(std::chrono::steady_clock::now()<deadline,why);std::this_thread::sleep_for(1ms);}
+        };
+        auto camera=[](double x){Java_com_infinipaint_demo_NativeBridge_setCamera(nullptr,nullptr,x,0,1);};
+        auto retry=[](){return Java_com_infinipaint_demo_NativeBridge_needsPublicationRetry(nullptr,nullptr)==JNI_TRUE;};
+        auto begin=[](){check(Java_com_infinipaint_demo_NativeBridge_begin(nullptr,nullptr,1,2),"planner begin");};
+        auto end=[](){check(Java_com_infinipaint_demo_NativeBridge_end(nullptr,nullptr,1),"planner end");};
+        auto add=[&](int x){begin();check(sample(x,1),"planner sample");end();};
+        auto frame=[&]{draws=0;render(0);};
+        auto matched=[&]{const auto hits=hostPlannerStats()[1];wait([&]{frame();return !retry() && hostPlannerStats()[1]>hits;},"matching plan deadline");};
+        auto park=[&]{hostParkPlanner();wait(hostPlannerParked,"planner park deadline");};
+        auto resume=[&]{hostResumePlanner();wait([&]{return !hostPlannerParked();},"planner resume deadline");};
+        hostStartPlanner();check(hostPlannerStats()[0],"production planner started");
+        Java_com_infinipaint_demo_NativeBridge_contextCreated(nullptr,nullptr);resize(1200,800);
+        camera(0);add(0);matched();check(draws==1,"planned single stroke");
+        const auto first=drawnVertices();hostForcePlannerFallback(true);frame();check(draws==1 && drawnVertices()==first,"same geometry on exact fallback");hostForcePlannerFallback(false);
+        park();camera(5000);frame();check(!retry() && draws==0 && uniformPanX==5000,"stale view rejected; exact fallback immediately responsive");
+        camera(0);frame();check(draws==1,"fallback retained current scene");
+        add(3);frame();check(!retry() && draws==2,"one queued delta may present");
+        add(6);frame();check(retry() && draws==2,"full delta slot preserves preceding revision");
+        camera(5000);frame();check(retry() && draws==0 && uniformPanX==5000,"camera independent while ordered patch waits");
+        camera(0);resume();matched();check(draws==3,"waiting delta replayed exactly once");
+        park();add(8);frame();check(draws==4,"queued old-epoch append");
+        Java_com_infinipaint_demo_NativeBridge_clear(nullptr,nullptr);frame();check(retry() && draws==4,"retain entire old scene until ordered reset admitted");
+        resume();matched();check(draws==0,"old-epoch plan never resurrects cleared strokes");
+        begin();check(sample(0,1),"live first");frame();park();
+        for(int i=1;i<=12;i++){check(sample(i,1+i*.01),"live sample while planner parked");frame();}
+        check(retry() && hostPlannerStats()[6]>=2 && hostLivePublicationBytes()>0,"retire saturation backpressure");
+        end();frame();check(retry(),"seal waits behind retirement cap");
+        resume();matched();check(draws==1,"one sealed stroke after drain");
+        wait([&]{return hostLivePublicationBytes()==0;},"live CPU retirement deadline");
+        auto sealed=drawnVertices();Java_com_infinipaint_demo_NativeBridge_contextCreated(nullptr,nullptr);matched();check(sealed==drawnVertices(),"planned context rebuild byte equality");
+        auto stats=hostPlannerStats();check(stats[5]==0 && stats[1]>0 && stats[2]>0 && stats[7]>=8,"planner evidence counters");
+        std::printf("PASS M04.3-C planner: exact fallback, stale camera, ordered delta/epoch backpressure, bounded live retirement, context recovery; hits=%llu fallback=%llu backpressure=%llu retired=%llu\n",(unsigned long long)stats[1],(unsigned long long)stats[2],(unsigned long long)stats[6],(unsigned long long)stats[7]);
+        return 0;
+    }
     if(argc>1 && std::string_view(argv[1])=="isolation") {
         using namespace engine::tablet;
         using namespace std::chrono_literals;

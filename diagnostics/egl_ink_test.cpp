@@ -20,8 +20,14 @@ extern "C" jint Java_com_infinipaint_demo_NativeBridge_command(JNIEnv*,jclass,ji
 #include <cstdlib>
 #include <cstring>
 #include <vector>
+#include <thread>
+#include <chrono>
+namespace engine::tablet {void hostStartPlanner();void hostForcePlannerFallback(bool);std::array<uint64_t,8> hostPlannerStats();}
+extern "C" jboolean Java_com_infinipaint_demo_NativeBridge_needsPublicationRetry(JNIEnv*,jclass);
 
 static int observedMax=-1;
+static bool planTest=false;
+static unsigned planComparisons=0;
 extern "C" {
 void Java_com_infinipaint_demo_NativeBridge_contextCreated(JNIEnv*, jclass);
 void Java_com_infinipaint_demo_NativeBridge_resizeViewport(JNIEnv*, jclass, jint, jint);
@@ -170,12 +176,24 @@ Bounds inkBounds(const Frame& frame, const Pixel& background) {
 }
 
 Frame render(int mode) {
-    Java_com_infinipaint_demo_NativeBridge_render(nullptr, nullptr, mode);
-    glCheck("production render");
-    Frame frame{};
-    glReadPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, frame.data());
-    glCheck("RGBA8 glReadPixels");
-    return frame;
+    using namespace std::chrono_literals;
+    using namespace engine::tablet;
+    auto draw=[](int m){Java_com_infinipaint_demo_NativeBridge_render(nullptr,nullptr,m);glCheck("production render");};
+    auto pixels=[](){Frame frame{};glReadPixels(0,0,width,height,GL_RGBA,GL_UNSIGNED_BYTE,frame.data());glCheck("RGBA8 glReadPixels");return frame;};
+    if(!planTest) {draw(mode);return pixels();}
+    auto wait=[&](bool matched) {
+        const auto hits=hostPlannerStats()[1];
+        const auto deadline=std::chrono::steady_clock::now()+5s;
+        do {
+            draw(mode);
+            if(!Java_com_infinipaint_demo_NativeBridge_needsPublicationRetry(nullptr,nullptr) && (!matched || hostPlannerStats()[1]>hits)) return;
+            std::this_thread::sleep_for(1ms);
+        } while(std::chrono::steady_clock::now()<deadline);
+        check(false,"planner did not deliver matching complete view");
+    };
+    hostForcePlannerFallback(true);wait(false);auto expected=pixels();
+    hostForcePlannerFallback(false);wait(true);auto actual=pixels();
+    check(actual==expected,"planned path differs from exact fallback RGBA");++planComparisons;return actual;
 }
 
 void clear() {
@@ -390,6 +408,8 @@ void comparePortableRamp() {
 #endif
 
 int main() {
+    planTest=std::getenv("IP_PLAN_TEST")!=nullptr;
+    if(planTest) {engine::tablet::hostStartPlanner();check(engine::tablet::hostPlannerStats()[0],"planner started");}
     Pbuffer pbuffer;
     const auto* version = reinterpret_cast<const char*>(glGetString(GL_VERSION));
     const auto* renderer = reinterpret_cast<const char*>(glGetString(GL_RENDERER));
@@ -500,4 +520,8 @@ int main() {
     clear();
     check(render(composite) == blank, "JNI clear left ink in the framebuffer");
     std::puts("PASS: production GLES2 shader, pressure dots/taper, pen-up, and completed order");
+    if(planTest) {
+        check(planComparisons>50 && engine::tablet::hostPlannerStats()[5]==0,"planned parity coverage");
+        std::printf("PASS: %u matched-plan versus exact-fallback RGBA frames\n",planComparisons);
+    }
 }

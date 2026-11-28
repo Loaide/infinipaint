@@ -20,6 +20,7 @@ build -pthread -I"$t" -Idiagnostics/test_support diagnostics/renderer_smoke.cpp 
 "$t/smoke"
 "$t/smoke" owners
 "$t/smoke" isolation
+"$t/smoke" planner
 build -pthread diagnostics/m04_live_prefix_test.cpp -o "$t/live_prefix"
 "$t/live_prefix"
 if [ "${1:-all}" = owners ]; then exit; fi
@@ -32,7 +33,7 @@ mkdir "$t/android"
 cp diagnostics/test_support/android/log.h "$t/android/"
 cp -R "$NDK_HEADERS/EGL" "$NDK_HEADERS/GLES2" "$NDK_HEADERS/KHR" "$t/"
 # GLVND libGL dispatches these common GL calls to the current EGL GLES context.
-build -DIP_REPLAY_TEST -DEGL_NO_X11 -I"$t" diagnostics/egl_ink_test.cpp "$c/native_bridge.cpp" "$c"/document/*.cpp \
+build -pthread -DIP_REPLAY_TEST -DEGL_NO_X11 -I"$t" diagnostics/egl_ink_test.cpp "$c/native_bridge.cpp" "$c"/document/*.cpp \
   "$c"/input/*.cpp "$c/stroke/spline.cpp" -l:libEGL.so.1 -l:libGL.so.1 -o "$t/pixels"
 export IP_RAMP_REFERENCE="$t/ramp.rgba"
 IP_EXPECT_MAX=1 EGL_PLATFORM=surfaceless LIBGL_ALWAYS_SOFTWARE=1 MESA_GLES_VERSION_OVERRIDE=2.0 "$t/pixels"

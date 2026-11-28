@@ -1,3 +1,9 @@
+# M04.3-C execution scheduling — functionally verified
+
+[Scope, host tests and tablet verification](M04_3_EXECUTION_SCHEDULING.md). No production Vulkan cutover or full scalability acceptance.
+
+---
+
 # M04.3-B render publication isolation — functionally verified
 
 See [current report](M04_3_RENDER_PUBLICATION.md) for scope, source anchor, host results and completed tablet verification and remaining performance obligations. No Vulkan cutover or full M04.3 acceptance.

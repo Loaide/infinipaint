@@ -23,4 +23,6 @@ adapter. Host core oracle: `diagnostics/run_m03.sh`; matched reconstruction pixe
 
 `tablet/{session.hpp,store_jni.cpp}` and `storage/{EditorStore,StorePort}.java` implement the staged switch and bounded worker/codec port. `document/{eraser,working_set}.hpp` implement swept ink coverage and aggregate admission. See the [v1 contract](M03_CONTRACT.md), [isolated tablet procedure](M03_TABLET.md), `diagnostics/run_m03_latency.sh` and `diagnostics/compare_m03.sh`. Only `src/m03Verify` has the test-process recovery service.
 
+M04.3-C functionally verified: `demo/InkPipeline.java` and `InkLane.java` own ordered multi-gesture admission and explicit blocked-head resolution; `tablet/frame_scheduler.hpp` owns bounded transfer and latest plan primitives; `native_bridge.cpp` owns resident planner, stamped visibility and CPU retirement. See [report](../reports/M04_3_EXECUTION_SCHEDULING.md).
+
 M04.3-B candidate: `tablet/live_prefix.hpp` owns append-only published page handles and immutable directories; `native_bridge.cpp` owns the publication port, live mirror/tail and GL latch. `diagnostics/run_renderer_smoke.sh` runs mock bridge, owner-credit, parked-lock and live-prefix tests; real EGL regression includes paged context rebuild. See [report](../reports/M04_3_RENDER_PUBLICATION.md).
